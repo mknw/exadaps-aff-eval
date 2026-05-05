@@ -14,7 +14,7 @@ what to build, in what order, all schemas, all rules, all constraints.
 how to branch, when to commit, commit message format,
 CI configuration, when and how to open pull requests.
 
-Read both completely. Then check `pipeline_state.json` to find where to resume.
+Read both completely. Then check `pipeline_state.json` for latest run status.
 
 ---
 
@@ -25,7 +25,7 @@ Read both completely. Then check `pipeline_state.json` to find where to resume.
 - Never commit secrets or API keys
 - Always run the relevant test before committing
 - Never open a PR until the full test suite passes with zero failures
-- `pipeline_state.json` is the source of truth for what is done — trust it
+- `pipeline_state.json` is a run-status log, not record storage
 
 ---
 
@@ -53,4 +53,4 @@ pytest data_pipeline/tests/ --tb=line -q 2>/dev/null | tail -10
 git status
 ```
 
-Then proceed to the next incomplete stage per `pipeline_state.json`.
+Then run dependent data stages with `python -m data_pipeline.cli run --all`.

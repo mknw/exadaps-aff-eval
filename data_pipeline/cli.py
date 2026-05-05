@@ -13,13 +13,15 @@ import structlog
 
 log = structlog.get_logger()
 
+_DEPENDENT_STAGES = {"order", "consolidate", "generate"}
+
 
 def _data_root() -> Path:
     return Path(os.getenv("DATA_ROOT", "./data"))
 
 
-def _state_path(data_root: Path) -> Path:
-    return data_root / "pipeline_state.json"
+def _state_path() -> Path:
+    return Path(__file__).parent.parent / "pipeline_state.json"
 
 
 # ---------------------------------------------------------------------------
@@ -56,14 +58,16 @@ def run(run_all: bool, stage: str | None, seed: int) -> None:
     """Run pipeline stages."""
     if not run_all and stage is None:
         raise click.UsageError("Specify --all or --stage <stage>")
+    if not run_all and stage in _DEPENDENT_STAGES:
+        raise click.UsageError(
+            f"Stage '{stage}' requires records from earlier stages in the same process. "
+            "Use: python -m data_pipeline.cli run --all"
+        )
 
     from data_pipeline import storage
 
     data_root = _data_root()
-    state_path = _state_path(data_root)
-
-    def _is_done(s: str) -> bool:
-        return storage.is_stage_complete(s, state_path)
+    state_path = _state_path()
 
     def _mark_done(s: str, **kwargs: object) -> None:
         storage.mark_stage_complete(s, state_path, **kwargs)
@@ -75,19 +79,6 @@ def run(run_all: bool, stage: str | None, seed: int) -> None:
     records: list = []
 
     for stg in stages_to_run:
-        if run_all and _is_done(stg):
-            click.echo(f"[skip] {stg} already complete")
-            # Load existing records for downstream stages
-            if stg in ("ingest", "order") and not records:
-                try:
-                    parquet_path = data_root / "consolidated" / "master.parquet"
-                    if parquet_path.exists():
-                        from data_pipeline import loader
-                        records = loader._load_all_records(data_root)
-                except Exception:
-                    pass
-            continue
-
         click.echo(f"[run] {stg}...")
         t0 = time.monotonic()
 
@@ -122,20 +113,24 @@ def run(run_all: bool, stage: str | None, seed: int) -> None:
             consolidate.run(records, data_root, seed)
 
         elif stg == "generate":
+            if not records:
+                raise click.ClickException(
+                    "No in-memory records available for generation. "
+                    "Run the full pipeline with --all."
+                )
             from data_pipeline.generate import synthetic
-            new_recs = synthetic.run(data_root, seed)
+            new_recs = synthetic.run(data_root, seed, state_path=state_path)
             click.echo(f"  Generated {len(new_recs)} records")
-            # Append to consolidated dataset
-            if new_recs and records:
-                all_recs = records + new_recs
-                from data_pipeline import consolidate
-                consolidate.run(all_recs, data_root, seed)
-            _mark_done("generate", new_records=len(new_recs))
+            records = records + new_recs
+            from data_pipeline import consolidate
+            consolidate.run(records, data_root, seed)
+            _mark_done("generate", new_records=len(new_recs), total_records=len(records))
 
         elif stg == "test":
             import subprocess
+            import sys
             result = subprocess.run(
-                ["pytest", "data_pipeline/tests/", "-v", "--tb=short"],
+                [sys.executable, "-m", "pytest", "data_pipeline/tests/", "-v", "--tb=short"],
                 cwd=str(Path(__file__).parent.parent),
             )
             if result.returncode == 0:
@@ -155,8 +150,7 @@ def run(run_all: bool, stage: str | None, seed: int) -> None:
 @cli.command()
 def status() -> None:
     """Show which pipeline stages are complete."""
-    data_root = _data_root()
-    state_path = _state_path(data_root)
+    state_path = _state_path()
 
     if not state_path.exists():
         click.echo("Pipeline not started — no pipeline_state.json found.")

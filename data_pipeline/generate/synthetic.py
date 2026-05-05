@@ -31,6 +31,33 @@ def _assign_split(seed: int) -> str:
     return "test"
 
 
+def _render_pdf_first_page(pdf_path: str, image_dir: Path, doc_id: str) -> str:
+    try:
+        import fitz  # pymupdf
+    except ImportError:
+        log.warning("synthetic.pymupdf_missing", doc_id=doc_id)
+        return ""
+
+    image_dir.mkdir(parents=True, exist_ok=True)
+    out_path = image_dir / f"{doc_id}.png"
+    if out_path.exists():
+        return str(out_path)
+
+    doc = None
+    try:
+        doc = fitz.open(pdf_path)
+        page = doc[0]
+        pix = page.get_pixmap(dpi=150)
+        pix.save(str(out_path))
+    except Exception as exc:
+        log.warning("synthetic.render_failed", doc_id=doc_id, error=str(exc))
+        return ""
+    finally:
+        if doc is not None:
+            doc.close()
+    return str(out_path)
+
+
 def _manifest_to_record(
     manifest: dict,
     schema_name: str,
@@ -79,11 +106,16 @@ def _manifest_to_record(
 
     split = _assign_split(seed)
     doc_id = f"{schema_name}_{seed:06d}"
+    image_path = _render_pdf_first_page(
+        pdf_path,
+        data_root / "generated" / "synthetic_pdfs" / "rendered_images",
+        doc_id,
+    )
 
     return DocumentRecord(
         source=f"synthetic_{schema_name}",
         doc_id=doc_id,
-        image_path="",  # no pre-rendered image for synthetic PDFs
+        image_path=image_path,
         pdf_path=pdf_path,
         page_count=1,
         language="en",
@@ -96,7 +128,11 @@ def _manifest_to_record(
     )
 
 
-def run(data_root: Path, seed: int) -> list[DocumentRecord]:
+def run(
+    data_root: Path,
+    seed: int,
+    state_path: Path | None = None,
+) -> list[DocumentRecord]:
     """
     Stage 4.2 main function.
 
@@ -146,7 +182,7 @@ def run(data_root: Path, seed: int) -> list[DocumentRecord]:
     # Apply Genalog degradation to train-split synthetic records
     train_recs = [r for r in all_records if r.split == "train"]
     if train_recs:
-        degraded = deg_module.run(train_recs, data_root)
+        degraded = deg_module.run(train_recs, data_root, state_path=state_path)
         all_records.extend(degraded)
 
     elapsed = time.monotonic() - t0

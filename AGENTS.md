@@ -29,8 +29,9 @@ Stage 4: GENERATE    — Genalog degradation variants + form_harness.py syntheti
 Stage 5: TEST        — pytest suite validating every stage output
 ```
 
-Pipeline is **resumable** — `pipeline_state.json` tracks completed stages.
-Re-running skips completed stages automatically.
+Pipeline keeps records in memory across dependent stages during `run --all`.
+`pipeline_state.json` is a run-status log only; it does not reload records
+after process restart.
 
 ---
 
@@ -43,7 +44,7 @@ Re-running skips completed stages automatically.
 ├── requirements.txt               ← pinned dependencies
 ├── pyproject.toml                 ← pytest + ruff config
 ├── .env.example                   ← no secrets, just DATA_ROOT + seed
-├── pipeline_state.json            ← written by pipeline, tracks stage completion
+├── pipeline_state.json            ← written by pipeline, tracks run status
 ├── form_harness.py                ← existing synthetic PDF generator (do not rewrite)
 │
 ├── data_pipeline/                 ← all source code
@@ -436,7 +437,7 @@ def test_generation_counts()              # works on fixture
 def test_hpe_aff_loader_returns_records() # works on fixture
 def test_rvlcdip_blocked_from_fill_eval() # works on fixture — tests the assertion
 def test_fill_ready_records_have_pdf()    # works on fixture
-def test_pipeline_resumable()             # works on fixture
+def test_pipeline_state_status_log()      # works on fixture
 ```
 
 ---
@@ -485,16 +486,13 @@ assert "rvlcdip" not in record.source, (
 ```bash
 python -m data_pipeline.cli run --all --seed 42
 python -m data_pipeline.cli run --stage ingest
-python -m data_pipeline.cli run --stage order
-python -m data_pipeline.cli run --stage consolidate
-python -m data_pipeline.cli run --stage generate
 python -m data_pipeline.cli run --stage test
 python -m data_pipeline.cli status
 python -m data_pipeline.cli report
 python -m data_pipeline.cli export --split val --output ./export/
 ```
 
-`status` reads `pipeline_state.json` and prints which stages are done.
+`status` reads `pipeline_state.json` and prints the latest run status.
 `report` prints the manifest summary in human-readable form.
 `export` copies the Parquet + field JSONs for a given split to a target directory.
 
@@ -553,7 +551,7 @@ No other environment variables. No Azure. No API keys.
 | Rewrite `form_harness.py` | It already works — import and call it |
 | Apply Genalog to val or test splits | Contaminates evaluation |
 | Allow RVL-CDIP into fill evaluation | No ground truth — enforce with assertion |
-| Skip writing `pipeline_state.json` | Pipeline resumability depends on it |
+| Treat `pipeline_state.json` as record storage | Records move through dependent stages in memory |
 | Add any dependency that makes network calls at import time | Breaks offline CI |
 
 ---

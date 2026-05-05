@@ -90,6 +90,23 @@ def _deduplicate(records: list[DocumentRecord]) -> list[DocumentRecord]:
 # Split assignment
 # ---------------------------------------------------------------------------
 
+def _split_counts(n: int) -> tuple[int, int, int]:
+    n_train = round(n * SPLIT_RATIOS["train"])
+    n_val = round(n * SPLIT_RATIOS["val"])
+    n_test = n - n_train - n_val
+
+    if n >= 3 and n_val == 0:
+        n_val = 1
+        n_train -= 1
+    if n >= 3 and n_test == 0:
+        n_test = 1
+        n_train -= 1
+
+    if n_train < 0:
+        n_train = 0
+    return n_train, n_val, n_test
+
+
 def _assign_splits(
     records: list[DocumentRecord],
     rng: random.Random,
@@ -104,30 +121,29 @@ def _assign_splits(
 
     for source, recs in by_source.items():
         is_vrdu = source.startswith("vrdu")
+        n_train, n_val, n_test = _split_counts(len(recs))
 
         if is_vrdu:
-            # Partition: gt records go to val/test preferentially
+            # Fill eval slots with GT records first, then leave remaining records for train.
             gt_recs = [r for r in recs if r.gt_payload]
             no_gt_recs = [r for r in recs if not r.gt_payload]
-
-            # All no-gt go to train
-            for rec in no_gt_recs:
-                rec.split = "train"
-
-            # gt records: split into val/test proportionally (50/50 of the eval budget)
             rng.shuffle(gt_recs)
-            n = len(gt_recs)
-            n_val = max(1, round(n * 0.5)) if n > 1 else 0
-            for i, rec in enumerate(gt_recs):
-                if i < n_val:
-                    rec.split = "val"
-                else:
-                    rec.split = "test"
+            rng.shuffle(no_gt_recs)
+
+            eval_order = gt_recs + no_gt_recs
+            val_recs = eval_order[:n_val]
+            test_recs = eval_order[n_val:n_val + n_test]
+            eval_ids = {id(r) for r in val_recs + test_recs}
+            train_recs = [r for r in recs if id(r) not in eval_ids]
+
+            for rec in train_recs:
+                rec.split = "train"
+            for rec in val_recs:
+                rec.split = "val"
+            for rec in test_recs:
+                rec.split = "test"
         else:
             rng.shuffle(recs)
-            n = len(recs)
-            n_train = round(n * SPLIT_RATIOS["train"])
-            n_val = round(n * SPLIT_RATIOS["val"])
             for i, rec in enumerate(recs):
                 if i < n_train:
                     rec.split = "train"

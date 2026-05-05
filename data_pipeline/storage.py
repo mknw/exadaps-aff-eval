@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -98,6 +99,23 @@ def dict_to_document_record(d: dict[str, Any]) -> DocumentRecord:
 # Manifest
 # ---------------------------------------------------------------------------
 
+def _dataset_fingerprint(records: list[DocumentRecord]) -> str:
+    h = hashlib.sha256()
+    for rec in sorted(records, key=lambda r: (r.source, r.doc_id)):
+        payload = {
+            "source": rec.source,
+            "doc_id": rec.doc_id,
+            "image_path": rec.image_path,
+            "pdf_path": rec.pdf_path,
+            "split": rec.split,
+            "quality_tier": rec.quality_tier,
+            "field_count": len(rec.fields),
+            "gt_payload": rec.gt_payload,
+        }
+        h.update(json.dumps(payload, sort_keys=True).encode("utf-8"))
+    return h.hexdigest()
+
+
 def build_manifest(records: list[DocumentRecord], seed: int) -> dict[str, Any]:
     sources = [
         "funsd", "xfund_de", "xfund_fr",
@@ -128,6 +146,7 @@ def build_manifest(records: list[DocumentRecord], seed: int) -> dict[str, Any]:
     return {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "seed": seed,
+        "dataset_fingerprint": _dataset_fingerprint(records),
         "total_documents": len(records),
         "by_source": by_source,
         "by_quality_tier": by_quality_tier,

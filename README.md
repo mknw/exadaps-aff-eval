@@ -16,7 +16,7 @@ A standalone five-stage data engineering pipeline that ingests four public form-
 | 4 | **GENERATE** | Genalog degradation variants + form_harness.py synthetic PDFs |
 | 5 | **TEST** | pytest suite validating every stage output |
 
-Pipeline is **resumable** — `pipeline_state.json` tracks completed stages. Re-running skips completed stages automatically.
+Pipeline runs dependent stages in one process so records move through ingest, order, consolidate, and generate in memory. `pipeline_state.json` is a run-status log only; it is not used to reload stage records after restart.
 
 See [`AGENTS.md`](AGENTS.md) for the full technical specification.
 
@@ -31,7 +31,7 @@ See [`AGENTS.md`](AGENTS.md) for the full technical specification.
 ├── requirements.txt               ← pinned dependencies
 ├── pyproject.toml                 ← pytest + ruff config
 ├── .env.example                   ← environment variable reference
-├── pipeline_state.json            ← stage completion tracker (written by pipeline)
+├── pipeline_state.json            ← run status log (written by pipeline)
 ├── form_harness.py                ← existing synthetic PDF generator
 │
 ├── data_pipeline/                 ← all source code
@@ -115,12 +115,12 @@ cp .env.example .env
 # Run all stages
 python -m data_pipeline.cli run --all --seed 42
 
-# Run individual stages
+# Standalone stages
 python -m data_pipeline.cli run --stage ingest
-python -m data_pipeline.cli run --stage order
-python -m data_pipeline.cli run --stage consolidate
-python -m data_pipeline.cli run --stage generate
 python -m data_pipeline.cli run --stage test
+
+# order/consolidate/generate require in-memory records from the same process:
+# use run --all for those stages
 
 # Check which stages are complete
 python -m data_pipeline.cli status

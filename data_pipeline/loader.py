@@ -19,6 +19,27 @@ def _data_root() -> Path:
     return Path(os.getenv("DATA_ROOT", "./data"))
 
 
+def _nullable_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    if value != value:  # pandas NaN
+        return None
+    text = str(value)
+    return text or None
+
+
+def _resolve_data_path(path: str | None, data_root: Path) -> Path | None:
+    if not path:
+        return None
+
+    candidate = Path(path)
+    if candidate.is_absolute():
+        return candidate
+    if candidate.exists():
+        return candidate
+    return data_root / candidate
+
+
 def _load_all_records(data_root: Path) -> list[DocumentRecord]:
     """Load all DocumentRecords from the consolidated dataset."""
     parquet_path = data_root / "consolidated" / "master.parquet"
@@ -49,7 +70,7 @@ def _load_all_records(data_root: Path) -> list[DocumentRecord]:
                 source=source,
                 doc_id=doc_id,
                 image_path=str(row.get("image_path", "")),
-                pdf_path=row.get("pdf_path") or None,
+                pdf_path=_nullable_str(row.get("pdf_path")),
                 page_count=int(row.get("page_count", 1)),
                 language=str(row.get("language", "en")),
                 doc_class=str(row.get("doc_class", "form")),
@@ -67,8 +88,8 @@ def _load_all_records(data_root: Path) -> list[DocumentRecord]:
 
 def load_for_hpe_aff(
     split: Optional[str] = "val",
-    require_pdf: bool = False,
-    require_gt: bool = False,
+    require_pdf: bool = True,
+    require_gt: bool = True,
     quality_tier: Optional[str] = None,
 ) -> list[DocumentRecord]:
     """
@@ -83,12 +104,17 @@ def load_for_hpe_aff(
     Raises:
         AssertionError: If RVL-CDIP records slip through (no ground truth)
     """
-    records = _load_all_records(_data_root())
+    data_root = _data_root()
+    records = _load_all_records(data_root)
 
     if split is not None:
         records = [r for r in records if r.split == split]
     if require_pdf:
-        records = [r for r in records if r.pdf_path and Path(r.pdf_path).exists()]
+        records = [
+            r for r in records
+            if (resolved := _resolve_data_path(r.pdf_path, data_root)) is not None
+            and resolved.exists()
+        ]
     if require_gt:
         records = [r for r in records if r.gt_payload]
     if quality_tier is not None:

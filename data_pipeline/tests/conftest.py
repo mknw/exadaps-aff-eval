@@ -58,8 +58,8 @@ def _make_record(
     return DocumentRecord(
         source=source,
         doc_id=doc_id,
-        image_path=f"data/raw/{source}/{doc_id}.png",
-        pdf_path=f"data/raw/{source}/{doc_id}.pdf" if has_pdf else None,
+        image_path=f"raw/{source}/{doc_id}.png",
+        pdf_path=f"raw/{source}/{doc_id}.pdf" if has_pdf else None,
         page_count=1,
         language="en",
         doc_class="form",
@@ -125,6 +125,13 @@ def mini_master_parquet(tmp_path: Path, mini_records: list[DocumentRecord]) -> t
 
     storage.write_parquet(mini_records, parquet_path)
     for rec in mini_records:
+        image_path = data_root / rec.image_path
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(b"fixture image")
+        if rec.pdf_path:
+            pdf_path = data_root / rec.pdf_path
+            pdf_path.parent.mkdir(parents=True, exist_ok=True)
+            pdf_path.write_bytes(b"%PDF-1.4\n% fixture\n")
         storage.write_field_json(rec, fields_dir)
 
     manifest = storage.build_manifest(mini_records, seed=42)

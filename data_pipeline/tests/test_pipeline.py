@@ -130,18 +130,18 @@ def test_quality_score_range(mini_records: list[DocumentRecord]) -> None:
 
 
 def test_vrdu_preferred_in_val_test() -> None:
-    """VRDU with non-empty gt_payload is preferentially in val+test splits."""
+    """VRDU eval slots prefer records with non-empty gt_payload while retaining train records."""
     from data_pipeline.order import run as order_run
 
     records = []
-    # 10 VRDU records with gt_payload
+    # 5 VRDU records with gt_payload and 5 without
     for i in range(10):
         records.append(_make_record(
             source="vrdu_registration",
             doc_id=f"vrdu_{i:03d}",
             split=None,
             has_pdf=True,
-            gt_payload={"field_1": f"val_{i}"},
+            gt_payload={"field_1": f"val_{i}"} if i < 5 else {},
         ))
     # 5 FUNSD records
     for i in range(5):
@@ -153,12 +153,15 @@ def test_vrdu_preferred_in_val_test() -> None:
 
     ordered = order_run(records, seed=42)
     vrdu_eval = [r for r in ordered if r.source == "vrdu_registration" and r.gt_payload]
-    splits = [r.split for r in vrdu_eval]
-    eval_count = splits.count("val") + splits.count("test")
-    # All VRDU gt records should be in val/test
-    assert eval_count == len(vrdu_eval), (
-        f"Expected all VRDU gt records in val/test, got {eval_count}/{len(vrdu_eval)}"
+    vrdu_train = [r for r in ordered if r.source == "vrdu_registration" and r.split == "train"]
+    vrdu_eval_split = [
+        r for r in ordered if r.source == "vrdu_registration" and r.split in ("val", "test")
+    ]
+    assert vrdu_train, "Expected VRDU train records after stratified split"
+    assert all(r.gt_payload for r in vrdu_eval_split), (
+        "Expected VRDU val/test slots to be filled by gt_payload records first"
     )
+    assert any(r.split in ("val", "test") for r in vrdu_eval)
 
 
 # ===========================================================================
@@ -201,6 +204,7 @@ def test_manifest_counts_match_parquet(mini_master_parquet: tuple[Path, list[Doc
     assert manifest["total_documents"] == len(df), (
         f"Manifest total {manifest['total_documents']} != parquet rows {len(df)}"
     )
+    assert len(manifest["dataset_fingerprint"]) == 64
 
     for split in ("train", "val", "test"):
         manifest_count = manifest.get("by_split", {}).get(split, 0)
@@ -333,7 +337,7 @@ def test_rvlcdip_blocked_from_fill_eval(
 
     from data_pipeline import loader
     with pytest.raises(AssertionError, match="RVL-CDIP"):
-        loader.load_for_hpe_aff(split="val")
+        loader.load_for_hpe_aff(split="val", require_pdf=False, require_gt=False)
 
 
 def test_fill_ready_records_have_pdf(mini_master_parquet: tuple[Path, list[DocumentRecord]]) -> None:
@@ -345,8 +349,8 @@ def test_fill_ready_records_have_pdf(mini_master_parquet: tuple[Path, list[Docum
         # We don't check file existence in fixture tests — paths are synthetic
 
 
-def test_pipeline_resumable(tmp_path: Path) -> None:
-    """pipeline_state.json tracking works — completed stages report as done."""
+def test_pipeline_state_status_log(tmp_path: Path) -> None:
+    """pipeline_state.json tracking works as a run-status log."""
     state_path = tmp_path / "pipeline_state.json"
 
     assert not storage.is_stage_complete("ingest", state_path)
@@ -363,3 +367,16 @@ def test_pipeline_resumable(tmp_path: Path) -> None:
         state = json.load(fh)
     assert state["ingest"]["status"] == "complete"
     assert state["ingest"]["records"] == 199
+
+
+def test_cli_dependent_stage_requires_run_all() -> None:
+    """Order/consolidate/generate require same-process in-memory records."""
+    from click.testing import CliRunner
+
+    from data_pipeline.cli import cli
+
+    runner = CliRunner()
+    for stage in ("order", "consolidate", "generate"):
+        result = runner.invoke(cli, ["run", "--stage", stage])
+        assert result.exit_code != 0
+        assert "requires records from earlier stages" in result.output

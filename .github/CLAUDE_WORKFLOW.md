@@ -106,7 +106,7 @@ Tests: test_no_duplicate_doc_ids, test_split_proportions, test_quality_score_ran
 ### What to always include in the commit
 - The implementation file(s)
 - The test(s) for that implementation
-- Updated `pipeline_state.json` if a stage completed
+- Updated `pipeline_state.json` if run status changed
 
 ### What to never commit
 - `.env` files or any file containing secrets
@@ -372,7 +372,7 @@ At the start of every Claude Code session on this project:
 # 1. Check current branch
 git branch --show-current
 
-# 2. Check what's already done
+# 2. Check latest run status
 cat pipeline_state.json 2>/dev/null || echo "Pipeline not started"
 
 # 3. Check test state
@@ -381,8 +381,8 @@ pytest data_pipeline/tests/ -v --tb=line 2>/dev/null | tail -20
 # 4. Check for uncommitted changes
 git status
 
-# 5. Proceed from the next incomplete stage
+# 5. Run dependent data stages with --all
 ```
 
-Do not re-implement anything that pipeline_state.json shows as completed.
-Do not re-run stages that have already passed their tests.
+`pipeline_state.json` is a status log, not record storage. Dependent data
+stages must run in one process with `python -m data_pipeline.cli run --all`.

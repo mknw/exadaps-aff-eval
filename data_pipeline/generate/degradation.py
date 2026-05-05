@@ -7,7 +7,7 @@ from pathlib import Path
 
 import structlog
 
-from data_pipeline import DocumentRecord
+from data_pipeline import DocumentRecord, storage
 
 log = structlog.get_logger()
 
@@ -41,6 +41,18 @@ def _try_import_genalog() -> object | None:
         return None
 
 
+def _record_genalog_available(state_path: Path | None, available: bool) -> None:
+    if state_path is None:
+        return
+    state = storage.read_pipeline_state(state_path)
+    state["genalog_available"] = available
+    storage.write_pipeline_state(state, state_path)
+
+
+def _source_degradable(source: str) -> bool:
+    return source in _SOURCES_TO_DEGRADE or source.startswith("synthetic_")
+
+
 def _apply_profile(
     ImageDegradation: object,
     img_path: str,
@@ -71,7 +83,11 @@ def _apply_profile(
     return str(out_path)
 
 
-def run(records: list[DocumentRecord], data_root: Path) -> list[DocumentRecord]:
+def run(
+    records: list[DocumentRecord],
+    data_root: Path,
+    state_path: Path | None = None,
+) -> list[DocumentRecord]:
     """
     Apply Genalog degradation to train-split records from real datasets.
 
@@ -83,14 +99,16 @@ def run(records: list[DocumentRecord], data_root: Path) -> list[DocumentRecord]:
     ImageDegradation = _try_import_genalog()
 
     if ImageDegradation is None:
+        _record_genalog_available(state_path, False)
         return []
+    _record_genalog_available(state_path, True)
 
     out_dir = data_root / "generated" / "degraded"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     train_records = [
         r for r in records
-        if r.split == "train" and r.source in _SOURCES_TO_DEGRADE and r.image_path
+        if r.split == "train" and _source_degradable(r.source) and r.image_path
     ]
 
     log.info("degradation.start", eligible=len(train_records))

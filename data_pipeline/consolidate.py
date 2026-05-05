@@ -12,6 +12,10 @@ from data_pipeline import DocumentRecord, storage
 log = structlog.get_logger()
 
 
+def _state_path() -> Path:
+    return Path(__file__).parent.parent / "pipeline_state.json"
+
+
 def run(records: list[DocumentRecord], data_root: Path, seed: int) -> None:
     """
     Stage 3 main function.
@@ -29,7 +33,7 @@ def run(records: list[DocumentRecord], data_root: Path, seed: int) -> None:
     fields_dir = consolidated_dir / "fields"
     parquet_path = consolidated_dir / "master.parquet"
     manifest_path = consolidated_dir / "manifest.json"
-    state_path = data_root / "pipeline_state.json"
+    state_path = _state_path()
 
     # Write Parquet master table
     storage.write_parquet(records, parquet_path)
