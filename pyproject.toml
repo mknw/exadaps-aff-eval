@@ -5,6 +5,19 @@ markers = [
     "hf_offline: mark test as requiring downloaded HuggingFace data (skipped in CI)",
 ]
 
+[tool.coverage.run]
+omit = [
+    # Require HuggingFace downloads or git clone — cannot run in offline CI
+    "data_pipeline/ingest/funsd.py",
+    "data_pipeline/ingest/xfund.py",
+    "data_pipeline/ingest/vrdu.py",
+    "data_pipeline/ingest/rvlcdip.py",
+    # Requires genalog system deps
+    "data_pipeline/generate/degradation.py",
+    # CLI integration — not unit-testable without full pipeline run
+    "data_pipeline/cli.py",
+]
+
 [tool.ruff]
 line-length = 100
 
