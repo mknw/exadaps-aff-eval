@@ -53,7 +53,7 @@ def _ingest_subset(lang_code: str, data_root: Path) -> list[DocumentRecord]:
     img_dir.mkdir(parents=True, exist_ok=True)
 
     log.info("ingest.xfund.start", lang=lang_code)
-    ds = load_dataset("rogerdehe/xfund", lang_code)
+    ds = load_dataset("rogerdehe/xfund", lang_code, trust_remote_code=True)
 
     records: list[DocumentRecord] = []
 

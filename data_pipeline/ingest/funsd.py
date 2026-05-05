@@ -26,7 +26,7 @@ def ingest(data_root: Path, seed: int) -> list[DocumentRecord]:  # noqa: ARG001
     img_dir.mkdir(parents=True, exist_ok=True)
 
     log.info("ingest.funsd.start")
-    ds = load_dataset("florianbussmann/FUNSD-vu2020revising")
+    ds = load_dataset("florianbussmann/FUNSD-vu2020revising", trust_remote_code=True)
 
     records: list[DocumentRecord] = []
 

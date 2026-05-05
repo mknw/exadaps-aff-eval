@@ -18,8 +18,8 @@ log = structlog.get_logger()
 _VRDU_REPO = "https://github.com/google-research-datasets/vrdu"
 
 _SUBSETS = {
-    "registration_forms": "vrdu_registration",
-    "ad_buy_forms": "vrdu_ad_buy",
+    "registration-form": "vrdu_registration",
+    "ad-buy-form": "vrdu_ad_buy",
 }
 
 
@@ -60,9 +60,10 @@ def _render_pdf_pages(pdf_path: Path, img_dir: Path, doc_id: str) -> list[str]:
     doc = fitz.open(str(pdf_path))
     for page_num in range(len(doc)):
         page = doc[page_num]
-        pix = page.get_pixmap(dpi=150)
         out_path = img_dir / f"{doc_id}_p{page_num:03d}.png"
-        pix.save(str(out_path))
+        if not out_path.exists():
+            pix = page.get_pixmap(dpi=150)
+            pix.save(str(out_path))
         img_paths.append(str(out_path))
     doc.close()
     return img_paths
@@ -75,7 +76,8 @@ def _parse_subset(
     img_dir: Path,
     seen_sha256: set[str],
 ) -> list[DocumentRecord]:
-    subset_dir = vrdu_dir / subset_name
+    # Actual repo structure: vrdu/{subset_name}/main/
+    subset_dir = vrdu_dir / subset_name / "main"
     jsonl_gz = subset_dir / "dataset.jsonl.gz"
     meta_json = subset_dir / "meta.json"
     pdfs_dir = subset_dir / "pdfs"
@@ -109,18 +111,14 @@ def _parse_subset(
                 log.warning("ingest.vrdu.json_error", error=str(exc))
                 continue
 
-            doc_id = str(item.get("doc_id", item.get("id", f"{source}_{len(records):05d}")))
-            pdf_filename = item.get("pdf_file", f"{doc_id}.pdf")
+            # Real schema uses "filename" key
+            pdf_filename = str(item.get("filename", item.get("doc_id", f"{source}_{len(records):05d}.pdf")))
+            doc_id = pdf_filename.replace(".pdf", "").replace(" ", "_")
             pdf_path = pdfs_dir / pdf_filename
 
             if not pdf_path.exists():
-                # Try finding by doc_id
-                alt = pdfs_dir / f"{doc_id}.pdf"
-                if alt.exists():
-                    pdf_path = alt
-                else:
-                    log.warning("ingest.vrdu.missing_pdf", doc_id=doc_id)
-                    continue
+                log.warning("ingest.vrdu.missing_pdf", doc_id=doc_id, filename=pdf_filename)
+                continue
 
             # Dedup by sha256
             sha = _pdf_sha256(pdf_path)
@@ -136,18 +134,29 @@ def _parse_subset(
             primary_image = img_paths[0] if img_paths else ""
 
             # Parse field annotations
-            annotations = item.get("annotations", {})
+            # Real VRDU schema: list of [field_name, [[value, [page,x0,y0,x1,y1], spans]]]
+            annotations = item.get("annotations", [])
             field_records: list[FieldRecord] = []
             gt_payload: dict[str, str] = {}
 
-            # Annotations can be dict {field_name: {value, bbox}} or list
-            if isinstance(annotations, dict):
-                for field_name, ann in annotations.items():
-                    value = str(ann.get("value", ann.get("text", "")))
-                    box = ann.get("bbox", ann.get("box", [0, 0, 0, 0]))
-                    if len(box) == 4:
-                        x0, y0, x1, y1 = [float(v) for v in box]
-                        # VRDU bboxes are normalised 0-1
+            for ann_entry in annotations:
+                if not isinstance(ann_entry, (list, tuple)) or len(ann_entry) < 2:
+                    continue
+
+                field_name = str(ann_entry[0])
+                occurrences = ann_entry[1]  # list of [value, bbox_list, spans]
+                mt = match_types.get(field_name, "StringMatch")
+
+                for occurrence in occurrences:
+                    if not isinstance(occurrence, (list, tuple)) or len(occurrence) < 2:
+                        continue
+
+                    value = str(occurrence[0]).strip()
+                    bbox_list = occurrence[1]  # [page, x0, y0, x1, y1]
+
+                    if isinstance(bbox_list, (list, tuple)) and len(bbox_list) == 5:
+                        page_num = int(bbox_list[0])
+                        x0, y0, x1, y1 = [float(v) for v in bbox_list[1:]]
                         bbox_norm = [
                             max(0.0, min(1.0, x0)),
                             max(0.0, min(1.0, y0)),
@@ -155,10 +164,8 @@ def _parse_subset(
                             max(0.0, min(1.0, y1)),
                         ]
                     else:
+                        page_num = 0
                         bbox_norm = [0.0, 0.0, 0.0, 0.0]
-
-                    page_num = int(ann.get("page", 0))
-                    mt = match_types.get(field_name, "StringMatch")
 
                     field_records.append(FieldRecord(
                         field_id=field_name,
@@ -168,45 +175,11 @@ def _parse_subset(
                         bbox_norm=bbox_norm,
                         page=page_num,
                         source_fmt="pdf",
-                        has_response=bool(value.strip()),
+                        has_response=bool(value),
                         match_type=mt,
                     ))
 
-                    if value.strip():
-                        gt_payload[field_name] = value
-
-            elif isinstance(annotations, list):
-                for ann in annotations:
-                    field_name = str(ann.get("field_name", ann.get("name", "")))
-                    value = str(ann.get("value", ann.get("text", "")))
-                    box = ann.get("bbox", ann.get("box", [0, 0, 0, 0]))
-                    if len(box) == 4:
-                        x0, y0, x1, y1 = [float(v) for v in box]
-                        bbox_norm = [
-                            max(0.0, min(1.0, x0)),
-                            max(0.0, min(1.0, y0)),
-                            max(0.0, min(1.0, x1)),
-                            max(0.0, min(1.0, y1)),
-                        ]
-                    else:
-                        bbox_norm = [0.0, 0.0, 0.0, 0.0]
-
-                    page_num = int(ann.get("page", 0))
-                    mt = match_types.get(field_name, "StringMatch")
-
-                    field_records.append(FieldRecord(
-                        field_id=field_name,
-                        label=field_name.replace("_", " ").title(),
-                        value=value,
-                        role="answer",
-                        bbox_norm=bbox_norm,
-                        page=page_num,
-                        source_fmt="pdf",
-                        has_response=bool(value.strip()),
-                        match_type=mt,
-                    ))
-
-                    if value.strip():
+                    if value:
                         gt_payload[field_name] = value
 
             page_count = int(item.get("page_count", len(img_paths) or 1))
