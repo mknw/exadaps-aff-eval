@@ -1,0 +1,39 @@
+# Environment
+.env
+
+# Data directories — too large for git
+data/raw/
+data/consolidated/
+data/generated/
+
+# Exception: test fixture PDFs are committed
+!data/test_forms/
+
+# Pipeline runtime state
+pipeline_state.json
+
+# HuggingFace cache
+.hf_cache/
+data/raw/.hf_cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Generated artifacts
+*.parquet
+*.tiff
+*.png
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Coverage
+.coverage
+htmlcov/

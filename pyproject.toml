@@ -1,0 +1,13 @@
+[tool.pytest.ini_options]
+testpaths = ["data_pipeline/tests"]
+addopts = "-v --tb=short"
+markers = [
+    "hf_offline: mark test as requiring downloaded HuggingFace data (skipped in CI)",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
