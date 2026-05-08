@@ -2,39 +2,46 @@
 
 from __future__ import annotations
 
+import json
+import zipfile
 from pathlib import Path
 
+import requests
 import structlog
+from PIL import Image
 
 from data_pipeline import DocumentRecord, FieldRecord
 
 log = structlog.get_logger()
 
-_SUBSETS = {
-    "de": "xfund_de",
-    "fr": "xfund_fr",
-}
-_LANGUAGES = {
-    "de": "de",
-    "fr": "fr",
-}
+# Official XFUND GitHub release — no HuggingFace loading script needed
+_BASE_URL = "https://github.com/doc-analysis/XFUND/releases/download/v1.0"
+_SUBSETS = {"de": "xfund_de", "fr": "xfund_fr"}
+_LANGUAGES = {"de": "de", "fr": "fr"}
 
 
-def _is_normalised(bbox: list[float]) -> bool:
-    """Return True if bbox values are already in 0-1 range."""
-    return all(0.0 <= v <= 1.0 for v in bbox)
+def _download(url: str, dest: Path) -> bool:
+    """Download url to dest. Returns True on success."""
+    if dest.exists():
+        return True
+    log.info("ingest.xfund.download", url=url)
+    try:
+        resp = requests.get(url, timeout=120, stream=True)
+        resp.raise_for_status()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return True
+    except Exception as exc:
+        log.error("ingest.xfund.download_failed", url=url, error=str(exc))
+        return False
 
 
-def _normalise_bbox(box: list, W: int, H: int) -> list[float]:
-    """Normalise bbox to 0-1. Handles both pixel and already-normalised coords."""
-    if len(box) != 4:
+def _normalise_bbox(bbox: list, W: int, H: int) -> list[float]:
+    if len(bbox) != 4:
         return [0.0, 0.0, 0.0, 0.0]
-    x0, y0, x1, y1 = [float(v) for v in box]
-    floats = [x0, y0, x1, y1]
-    if _is_normalised(floats):
-        # Already normalised — clamp and return
-        return [max(0.0, min(1.0, v)) for v in floats]
-    # Pixel coords — normalise
+    x0, y0, x1, y1 = [float(v) for v in bbox]
     return [
         max(0.0, min(1.0, x0 / W)),
         max(0.0, min(1.0, y0 / H)),
@@ -44,37 +51,66 @@ def _normalise_bbox(box: list, W: int, H: int) -> list[float]:
 
 
 def _ingest_subset(lang_code: str, data_root: Path) -> list[DocumentRecord]:
-    from datasets import load_dataset  # type: ignore[import]
-    from PIL import Image
-
     source = _SUBSETS[lang_code]
     language = _LANGUAGES[lang_code]
-    img_dir = data_root / "raw" / "xfund" / lang_code
-    img_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = data_root / "raw" / "xfund" / lang_code
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    img_dir = raw_dir / "images"
+    img_dir.mkdir(exist_ok=True)
+    png_dir = raw_dir / "images_png"
+    png_dir.mkdir(exist_ok=True)
 
     log.info("ingest.xfund.start", lang=lang_code)
-    ds = load_dataset("rogerdehe/xfund", lang_code, trust_remote_code=True)
-
     records: list[DocumentRecord] = []
 
-    for split_name in ds.keys():
-        for item in ds[split_name]:
-            doc_id = str(item.get("id", item.get("doc_id", f"{source}_{len(records):05d}")))
+    for split_name in ("train", "val"):
+        json_dest = raw_dir / f"{lang_code}.{split_name}.json"
+        zip_dest = raw_dir / f"{lang_code}.{split_name}.zip"
+        json_url = f"{_BASE_URL}/{lang_code}.{split_name}.json"
+        zip_url = f"{_BASE_URL}/{lang_code}.{split_name}.zip"
 
-            img = item.get("image")
-            if img is None:
-                log.warning("ingest.xfund.no_image", doc_id=doc_id, lang=lang_code)
+        if not _download(json_url, json_dest):
+            log.warning("ingest.xfund.json_skip", lang=lang_code, split=split_name)
+            continue
+        if not _download(zip_url, zip_dest):
+            log.warning("ingest.xfund.zip_skip", lang=lang_code, split=split_name)
+            continue
+
+        # Extract images (idempotent — zipfile won't re-extract existing files)
+        with zipfile.ZipFile(zip_dest) as zf:
+            zf.extractall(img_dir)
+
+        with open(json_dest, encoding="utf-8") as f:
+            data = json.load(f)
+
+        for doc in data.get("documents", []):
+            doc_id = str(doc.get("id", f"{source}_{len(records):05d}"))
+            img_info = doc.get("img", {})
+            fname = img_info.get("fname", "")
+            W = int(img_info.get("width", 1))
+            H = int(img_info.get("height", 1))
+
+            # Locate image — search recursively under img_dir
+            img_path: Path | None = None
+            direct = img_dir / fname
+            if direct.exists():
+                img_path = direct
+            else:
+                matches = list(img_dir.rglob(Path(fname).name))
+                if matches:
+                    img_path = matches[0]
+
+            if img_path is None:
+                log.warning("ingest.xfund.no_image", doc_id=doc_id, fname=fname)
                 continue
 
-            img_path = img_dir / f"{doc_id}.png"
-            if not img_path.exists():
-                if not isinstance(img, Image.Image):
-                    img = Image.fromarray(img)
-                img.save(img_path)
+            # Normalise to PNG
+            png_path = png_dir / f"{doc_id}.png"
+            if not png_path.exists():
+                with Image.open(img_path) as im:
+                    im.save(png_path)
 
-            W, H = img.size
-
-            annotations = item.get("annotations", item.get("form", []))
+            annotations = doc.get("document", [])
             field_records: list[FieldRecord] = []
             gt_payload: dict[str, str] = {}
 
@@ -82,10 +118,8 @@ def _ingest_subset(lang_code: str, data_root: Path) -> list[DocumentRecord]:
                 eid = str(entity.get("id", ""))
                 label_text = entity.get("text", "")
                 role = entity.get("label", "other").lower()
-
-                box = entity.get("box", entity.get("bbox", [0, 0, 0, 0]))
+                box = entity.get("box", [0, 0, 0, 0])
                 bbox_norm = _normalise_bbox(list(box), W, H)
-
                 has_response = role == "answer" and bool(label_text.strip())
 
                 field_records.append(FieldRecord(
@@ -100,13 +134,13 @@ def _ingest_subset(lang_code: str, data_root: Path) -> list[DocumentRecord]:
                     match_type=None,
                 ))
 
-                if role == "answer" and label_text.strip():
+                if has_response:
                     gt_payload[eid] = label_text
 
             records.append(DocumentRecord(
                 source=source,
                 doc_id=doc_id,
-                image_path=str(img_path),
+                image_path=str(png_path),
                 pdf_path=None,
                 page_count=1,
                 language=language,
@@ -123,7 +157,12 @@ def _ingest_subset(lang_code: str, data_root: Path) -> list[DocumentRecord]:
 
 
 def ingest(data_root: Path, seed: int) -> list[DocumentRecord]:  # noqa: ARG001
-    """Download and normalise XFUND German + French subsets."""
+    """Download and normalise XFUND German + French subsets.
+
+    Downloads directly from official XFUND GitHub release (v1.0).
+    Replaces rogerdehe/xfund which used a loading script incompatible
+    with datasets>=4.0.
+    """
     records: list[DocumentRecord] = []
     for lang_code in ("de", "fr"):
         try:

@@ -25,7 +25,7 @@ _SUBSETS = {
 
 def _clone_vrdu(vrdu_dir: Path) -> bool:
     """Clone VRDU repo if not already present. Returns True on success."""
-    if (vrdu_dir / "registration_forms").exists():
+    if (vrdu_dir / "registration-form").exists():
         log.info("ingest.vrdu.already_cloned", path=str(vrdu_dir))
         return True
     vrdu_dir.parent.mkdir(parents=True, exist_ok=True)

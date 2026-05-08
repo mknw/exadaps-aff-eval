@@ -75,6 +75,18 @@ def _make_record(
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(scope="session")
+def real_data_root() -> Path:
+    """Session-scoped fixture pointing at the actual data/ directory.
+
+    Used by @hf_offline tests so already-downloaded datasets (VRDU git clone,
+    XFUND zips, HF cache) are reused rather than re-fetched per test.
+    """
+    root = Path(__file__).parent.parent.parent / "data"
+    root.mkdir(exist_ok=True)
+    return root
+
+
 @pytest.fixture
 def sample_funsd_record() -> DocumentRecord:
     return _make_record(source="funsd", doc_id="funsd_test_001")

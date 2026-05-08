@@ -21,10 +21,10 @@ from data_pipeline.tests.conftest import _make_record, hf_offline
 # ===========================================================================
 
 @hf_offline
-def test_funsd_ingest_schema(tmp_path: Path) -> None:
+def test_funsd_ingest_schema(real_data_root: Path) -> None:
     """Every FUNSD record has required keys, bbox_norm values in [0,1], has_response is bool."""
     from data_pipeline.ingest.funsd import ingest
-    records = ingest(tmp_path, seed=42)
+    records = ingest(real_data_root, seed=42)
     assert len(records) > 0, "FUNSD ingester returned no records"
     for rec in records:
         assert isinstance(rec.source, str) and rec.source == "funsd"
@@ -41,10 +41,10 @@ def test_funsd_ingest_schema(tmp_path: Path) -> None:
 
 
 @hf_offline
-def test_funsd_bbox_range(tmp_path: Path) -> None:
+def test_funsd_bbox_range(real_data_root: Path) -> None:
     """FUNSD bboxes are 0-1 normalised, not raw pixel coords."""
     from data_pipeline.ingest.funsd import ingest
-    records = ingest(tmp_path, seed=42)
+    records = ingest(real_data_root, seed=42)
     for rec in records:
         for f in rec.fields:
             x0, y0, x1, y1 = f.bbox_norm
@@ -53,10 +53,10 @@ def test_funsd_bbox_range(tmp_path: Path) -> None:
 
 
 @hf_offline
-def test_xfund_bbox_normalised(tmp_path: Path) -> None:
+def test_xfund_bbox_normalised(real_data_root: Path) -> None:
     """XFUND bboxes are 0-1 normalised (not raw pixel coords)."""
     from data_pipeline.ingest.xfund import ingest
-    records = ingest(tmp_path, seed=42)
+    records = ingest(real_data_root, seed=42)
     assert len(records) > 0, "XFUND ingester returned no records"
     for rec in records:
         assert rec.source in ("xfund_de", "xfund_fr")
@@ -68,10 +68,10 @@ def test_xfund_bbox_normalised(tmp_path: Path) -> None:
 
 
 @hf_offline
-def test_vrdu_gt_payload_non_empty(tmp_path: Path) -> None:
+def test_vrdu_gt_payload_non_empty(real_data_root: Path) -> None:
     """At least 80% of VRDU records have non-empty gt_payload."""
     from data_pipeline.ingest.vrdu import ingest
-    records = ingest(tmp_path, seed=42)
+    records = ingest(real_data_root, seed=42)
     vrdu_recs = [r for r in records if r.source.startswith("vrdu")]
     assert len(vrdu_recs) > 0, "VRDU ingester returned no records"
     with_gt = [r for r in vrdu_recs if r.gt_payload]
@@ -80,10 +80,10 @@ def test_vrdu_gt_payload_non_empty(tmp_path: Path) -> None:
 
 
 @hf_offline
-def test_vrdu_pdf_paths_exist(tmp_path: Path) -> None:
+def test_vrdu_pdf_paths_exist(real_data_root: Path) -> None:
     """Every VRDU record with has_pdf=True has an accessible file at pdf_path."""
     from data_pipeline.ingest.vrdu import ingest
-    records = ingest(tmp_path, seed=42)
+    records = ingest(real_data_root, seed=42)
     vrdu_recs = [r for r in records if r.source.startswith("vrdu")]
     for rec in vrdu_recs:
         assert rec.pdf_path is not None, f"VRDU record {rec.doc_id} has no pdf_path"
@@ -91,10 +91,10 @@ def test_vrdu_pdf_paths_exist(tmp_path: Path) -> None:
 
 
 @hf_offline
-def test_rvlcdip_fields_empty(tmp_path: Path) -> None:
+def test_rvlcdip_fields_empty(real_data_root: Path) -> None:
     """All RVL-CDIP records have empty fields list — no false field annotations."""
     from data_pipeline.ingest.rvlcdip import ingest
-    records = ingest(tmp_path, seed=42)
+    records = ingest(real_data_root, seed=42)
     assert len(records) > 0, "RVL-CDIP ingester returned no records"
     for rec in records:
         assert rec.fields == [], f"RVL-CDIP record {rec.doc_id} has non-empty fields"
@@ -367,6 +367,66 @@ def test_pipeline_state_status_log(tmp_path: Path) -> None:
         state = json.load(fh)
     assert state["ingest"]["status"] == "complete"
     assert state["ingest"]["records"] == 199
+
+
+def test_consolidate_run(mini_records: list[DocumentRecord], tmp_path: Path) -> None:
+    """consolidate.run() writes Parquet, field JSONs, and manifest to data_root."""
+    from data_pipeline import consolidate
+    data_root = tmp_path / "data"
+    consolidate.run(mini_records, data_root, seed=42)
+    assert (data_root / "consolidated" / "master.parquet").exists()
+    assert (data_root / "consolidated" / "manifest.json").exists()
+    fields_dir = data_root / "consolidated" / "fields"
+    assert fields_dir.is_dir()
+    assert len(list(fields_dir.glob("*.json"))) == len(mini_records)
+
+
+def test_synthetic_run_small(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """synthetic.run() produces one DocumentRecord per schema when count=1."""
+    import data_pipeline.generate.synthetic as syn
+    monkeypatch.setattr(syn, "GENERATION_CONFIG", {
+        "supplier":   {"count": 1, "seed_base": 1000},
+        "invoice":    {"count": 1, "seed_base": 2000},
+        "compliance": {"count": 1, "seed_base": 3000},
+        "patient":    {"count": 1, "seed_base": 4000},
+    })
+    data_root = tmp_path / "data"
+    records = syn.run(data_root, seed=42)
+    # 4 schemas × 1 each; genalog unavailable so no degraded extras
+    assert len(records) >= 4
+    for rec in records:
+        assert rec.source.startswith("synthetic_")
+        assert rec.quality_tier == "clean_synthetic"
+        assert rec.pdf_path is not None
+        assert Path(rec.pdf_path).exists()
+
+
+def test_loader_filter(
+    mini_master_parquet: tuple[Path, list[DocumentRecord]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """loader.filter() returns only records matching the given source."""
+    data_root, _ = mini_master_parquet
+    monkeypatch.setenv("DATA_ROOT", str(data_root))
+    from data_pipeline import loader
+    result = loader.filter(source="funsd")
+    assert len(result) > 0
+    assert all(r.source == "funsd" for r in result)
+
+
+def test_loader_stats(
+    mini_master_parquet: tuple[Path, list[DocumentRecord]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """loader.stats() returns manifest with correct total_documents count."""
+    data_root, records = mini_master_parquet
+    monkeypatch.setenv("DATA_ROOT", str(data_root))
+    from data_pipeline import loader
+    s = loader.stats()
+    total = s.get("total_documents") or s.get("total")
+    assert total == len(records)
 
 
 def test_cli_dependent_stage_requires_run_all() -> None:
