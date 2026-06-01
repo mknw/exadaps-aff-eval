@@ -39,7 +39,7 @@ def _group_entities(words: list, bboxes: list, ner_tags: list) -> list[dict]:
                 current = None
             continue
 
-        if is_begin or current is None or current["role"] != role:
+        if is_begin or current is None or current["role"] != role:  # pylint: disable=E1136
             if current is not None:
                 entities.append(current)
             current = {
@@ -49,10 +49,10 @@ def _group_entities(words: list, bboxes: list, ner_tags: list) -> list[dict]:
                 "bbox": list(bbox),
             }
         else:
-            current["words"].append(word)
-            ex0, ey0, ex1, ey1 = current["bbox"]
+            current["words"].append(word)  # pylint: disable=E1136
+            ex0, ey0, ex1, ey1 = current["bbox"]  # pylint: disable=E1136
             bx0, by0, bx1, by1 = bbox
-            current["bbox"] = [
+            current["bbox"] = [  # pylint: disable=E1137
                 min(ex0, bx0),
                 min(ey0, by0),
                 max(ex1, bx1),

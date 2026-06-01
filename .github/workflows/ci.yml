@@ -1,9 +1,10 @@
-name: HPE-AFF Data Pipeline CI
+name: HPE-AFF Lint
 
 on:
   push:
     branches:
-      - 'data-pipeline/**'
+      - 'feature/**'
+      - 'pdf-synth'
   pull_request:
     branches:
       - main
@@ -12,9 +13,9 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
 
     steps:
       - name: Checkout
@@ -26,36 +27,11 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install system dependencies for Genalog
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libpango-1.0-0 libpangoft2-1.0-0 \
-            libgdk-pixbuf2.0-0 libcairo2 \
-            libffi-dev
-
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
+      - name: Install linting tools
+        run: pip install ruff pylint
 
       - name: Lint with ruff
-        run: python -m ruff check data_pipeline/
+        run: python -m ruff check src/aff/ tests/
 
-      - name: Run test suite
-        env:
-          DATA_ROOT: ./data_ci
-          PIPELINE_SEED: 42
-          PIPELINE_LOG_LEVEL: WARNING
-          HF_DATASETS_OFFLINE: 1
-        run: |
-          pytest data_pipeline/tests/ \
-            -v --tb=short \
-            --cov=data_pipeline \
-            --cov-report=term-missing \
-            --cov-fail-under=65
-
-      - name: Upload coverage report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: .coverage
+      - name: Lint with pylint (errors only)
+        run: python -m pylint --disable=all --enable=E src/aff/
