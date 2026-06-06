@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "description": "Shared golden set for blank-form generation approaches. Each approach worktree applies its technique to whichever documents its category supports.",
+  "documents": [
+    {
+      "id": "synthetic_supplier",
+      "category": "synthetic_acroform",
+      "source": "synthetic_supplier",
+      "doc_id": "supplier_001000",
+      "pdf": "synthetic_supplier.pdf",
+      "image": null,
+      "fields_json": "synthetic_supplier.fields.json",
+      "notes": "AcroForm widgets with /V, /AP, /MK BG to be cleared. 7 answer fields, page 0."
+    },
+    {
+      "id": "vrdu_born_digital",
+      "category": "born_digital_pdf",
+      "source": "vrdu_ad_buy",
+      "doc_id": "0a32ce11-7ed9-14ee-8856-6a1edfad9ff3",
+      "pdf": "vrdu_born_digital.pdf",
+      "image": null,
+      "fields_json": "vrdu_born_digital.fields.json",
+      "notes": "3-page born-digital PDF, ~2660 text chars on page 0, 1 image XObject (logo). 42 AcroForm widgets exist but answers are positioned in the content stream, not as widget values. 15 answer fields total."
+    },
+    {
+      "id": "vrdu_scan",
+      "category": "image_only_pdf",
+      "source": "vrdu_ad_buy",
+      "doc_id": "414817-collect-files-53928-political-file-2012-non",
+      "pdf": "vrdu_scan.pdf",
+      "image": null,
+      "fields_json": "vrdu_scan.fields.json",
+      "notes": "1-page scan-only PDF (single image XObject covering full page). Zero structural text. Image-fallback techniques only. 10 answer fields."
+    },
+    {
+      "id": "funsd",
+      "category": "image_only_png",
+      "source": "funsd",
+      "doc_id": "82",
+      "pdf": null,
+      "image": "funsd.png",
+      "fields_json": "funsd.fields.json",
+      "notes": "FUNSD scanned form (762x1000 greyscale). Underline-style answer fields with mixed handwriting + typed text. 5 answer fields."
+    },
+    {
+      "id": "xfund_de",
+      "category": "image_only_png",
+      "source": "xfund_de",
+      "doc_id": "de_train_23",
+      "pdf": null,
+      "image": "xfund_de.png",
+      "fields_json": "xfund_de.fields.json",
+      "notes": "XFUND German scanned form (2480x3508 RGB). Table-grid layout with light gray borders. 28 answer fields."
+    }
+  ],
+  "category_compatibility": {
+    "synthetic_acroform": [
+      "pymupdf-redact",
+      "content-stream-surgery",
+      "overlay-mask",
+      "page-rebuild",
+      "image-fallback"
+    ],
+    "born_digital_pdf": [
+      "pymupdf-redact",
+      "content-stream-surgery",
+      "overlay-mask",
+      "page-rebuild",
+      "image-fallback"
+    ],
+    "image_only_pdf": [
+      "image-fallback"
+    ],
+    "image_only_png": [
+      "image-fallback"
+    ]
+  }
+}

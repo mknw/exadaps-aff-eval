@@ -29,6 +29,9 @@ build/
 *.tiff
 *.png
 
+# Exception: golden-set fixtures are committed
+!tests/fixtures/golden_set/**
+
 # IDE
 .vscode/
 .idea/
