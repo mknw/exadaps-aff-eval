@@ -6,3 +6,7 @@ local background sampling, optional inpainting) and re-encodes pages as an
 image-PDF. The only approach in the comparison that handles every category
 in the golden set.
 """
+
+from aff.blank_forms.image_fallback import generate_blank
+
+__all__ = ["generate_blank"]
