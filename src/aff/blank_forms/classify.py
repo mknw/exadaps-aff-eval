@@ -101,21 +101,46 @@ def classify_window(
     return Classification(text_mask, h_rule_mask, v_rule_mask, fg_mask, window)
 
 
+def _hgap(a: Bbox, b: Bbox) -> int:
+    return max(0, max(a[0], b[0]) - min(a[2], b[2]))
+
+
+def _voverlap(a: Bbox, b: Bbox) -> int:
+    return min(a[3], b[3]) - max(a[1], b[1])
+
+
 def expand_to_text_components(
     classification: Classification,
     seed_bbox: Bbox,
     *,
     vertical_overlap_min_px: int = 2,
+    chain_max_gap_frac: float = 1.5,
+    chain_max_gap_min_px: int = 8,
 ) -> Bbox:
-    """Union the bboxes of text components that vertically overlap ``seed_bbox``.
+    """Union text components in the same line as ``seed_bbox`` by chaining.
 
-    Uses vertical-overlap rather than centre-inside so the funsd case —
-    where the annotation is short *and* slightly mis-positioned — still
-    picks up the full text, but neighbouring rows that happen to land
-    inside the search window are rejected.
+    Strategy: a component is in the answer's redaction set iff there is
+    an unbroken chain of horizontally-close, vertically-aligned text
+    components linking it back to a component that overlaps the seed
+    bbox. This handles two cases at once:
+
+    * funsd's "H.L. Williams" where the annotation only covers
+      "Williams": "Williams" overlaps the seed, "L." chains via a small
+      gap, "H" chains via a small gap.
+    * xfund_de's question column "Privatadresse" sitting in the same
+      row as the answer "56068 Koblenz": the question word is too far
+      horizontally from any component that overlaps the seed, so the
+      chain breaks before reaching it.
+
+    The chain gap budget is ``chain_max_gap_frac * seed_bbox_height``
+    floored at ``chain_max_gap_min_px``. 1.5x bbox height covers
+    inter-word gaps within an answer ("1995- 13D" has a ~2x bbox height
+    gap between the digits and the dash-prefixed code) while staying
+    well under the much larger gaps that separate columns on these
+    fixtures (xfund_de's question-to-answer gap is ~5x bbox height).
 
     Returns ``seed_bbox`` unchanged if nothing qualifies; the caller
-    treats that as a no-op (no text → no erase).
+    treats that as a no-op (no text -> no erase).
     """
     n, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
         classification.text_mask, connectivity=8
@@ -123,33 +148,52 @@ def expand_to_text_components(
     if n <= 1:
         return seed_bbox
 
-    win_x0, win_y0, _win_x1, _win_y1 = classification.window
+    win_x0, win_y0, win_x1, win_y1 = classification.window
     sx0, sy0, sx1, sy1 = seed_bbox
 
-    keep: list[Bbox] = []
+    seed_h = max(1, sy1 - sy0)
+    max_gap = max(chain_max_gap_min_px, round(seed_h * chain_max_gap_frac))
+
+    components: list[Bbox] = []
     for i in range(1, n):
         cx0_rel, cy0_rel, cw, ch, _area = stats[i]
         cx0 = win_x0 + int(cx0_rel)
         cy0 = win_y0 + int(cy0_rel)
-        cx1 = cx0 + int(cw)
-        cy1 = cy0 + int(ch)
-        overlap = min(cy1, sy1) - max(cy0, sy0)
-        if overlap >= vertical_overlap_min_px:
-            keep.append((cx0, cy0, cx1, cy1))
+        components.append((cx0, cy0, cx0 + int(cw), cy0 + int(ch)))
 
-    if not keep:
+    in_set: list[Bbox] = [
+        c
+        for c in components
+        if _voverlap(c, seed_bbox) >= vertical_overlap_min_px and _hgap(c, seed_bbox) == 0
+    ]
+    if not in_set:
         return seed_bbox
 
-    out_x0 = min(b[0] for b in keep)
-    out_y0 = min(b[1] for b in keep)
-    out_x1 = max(b[2] for b in keep)
-    out_y1 = max(b[3] for b in keep)
+    pool = [c for c in components if c not in in_set]
+    changed = True
+    while changed:
+        changed = False
+        remaining: list[Bbox] = []
+        for c in pool:
+            connected = any(
+                _voverlap(c, k) >= vertical_overlap_min_px and _hgap(c, k) <= max_gap
+                for k in in_set
+            )
+            if connected:
+                in_set.append(c)
+                changed = True
+            else:
+                remaining.append(c)
+        pool = remaining
+
+    out_x0 = min(b[0] for b in in_set)
+    out_y0 = min(b[1] for b in in_set)
+    out_x1 = max(b[2] for b in in_set)
+    out_y1 = max(b[3] for b in in_set)
     out_x0 = min(out_x0, sx0)
     out_y0 = min(out_y0, sy0)
     out_x1 = max(out_x1, sx1)
     out_y1 = max(out_y1, sy1)
-    win_x1 = classification.window[2]
-    win_y1 = classification.window[3]
     return (
         max(out_x0, win_x0),
         max(out_y0, win_y0),

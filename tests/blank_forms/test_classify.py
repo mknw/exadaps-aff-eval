@@ -115,6 +115,27 @@ def test_expand_to_text_components_ignores_neighbour_row() -> None:
     assert out[3] <= 75
 
 
+def test_expand_to_text_components_ignores_neighbour_column() -> None:
+    """xfund_de pattern: a question label sits in the same row as the answer
+    but in a different column. CC sweep must reject it on horizontal overlap."""
+    img = _blank(40, 240)
+    # Question column on the left (x=10..70), same y-range as the answer
+    for x0 in (10, 25, 40, 55):
+        _paint_rect(img, x0, 14, x0 + 10, 28)
+    # Answer column on the right (x=140..210)
+    for x0 in (140, 160, 180):
+        _paint_rect(img, x0, 14, x0 + 10, 28)
+
+    seed_bbox = (135, 12, 215, 30)
+    window = (0, 0, 240, 40)  # wide enough to contain both columns
+    cls = classify_window(img, window, seed_bbox)
+
+    out = expand_to_text_components(cls, seed_bbox)
+
+    assert out[0] >= 130, f"expected x0 to stay near answer column, got {out}"
+    assert out[2] <= 220
+
+
 def test_expand_to_text_components_returns_seed_when_no_text() -> None:
     img = _blank(40, 80)
     seed_bbox = (10, 5, 70, 35)
