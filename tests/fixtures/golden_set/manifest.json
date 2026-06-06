@@ -51,6 +51,36 @@
       "image": "xfund_de.png",
       "fields_json": "xfund_de.fields.json",
       "notes": "XFUND German scanned form (2480x3508 RGB). Table-grid layout with light gray borders. 28 answer fields."
+    },
+    {
+      "id": "xfund_de_train_2",
+      "category": "image_only_png",
+      "source": "xfund_de",
+      "doc_id": "de_train_2",
+      "pdf": null,
+      "image": "xfund_de_train_2.png",
+      "fields_json": "xfund_de_train_2.fields.json",
+      "notes": "XFUND German scanned form with cell-by-cell character input (one glyph per box). 22 answer fields. Stresses image-fallback's ability to operate on tight per-character bboxes."
+    },
+    {
+      "id": "xfund_de_train_49",
+      "category": "image_only_png",
+      "source": "xfund_de",
+      "doc_id": "de_train_49",
+      "pdf": null,
+      "image": "xfund_de_train_49.png",
+      "fields_json": "xfund_de_train_49.fields.json",
+      "notes": "XFUND German scanned form. 25 answer fields. Different layout from de_train_23 and de_train_2."
+    },
+    {
+      "id": "xfund_fr_train_21",
+      "category": "image_only_png",
+      "source": "xfund_fr",
+      "doc_id": "fr_train_21",
+      "pdf": null,
+      "image": "xfund_fr_train_21.png",
+      "fields_json": "xfund_fr_train_21.fields.json",
+      "notes": "XFUND French scanned form with cell-by-cell character input and checkbox markers. 59 answer fields — the densest in the set."
     }
   ],
   "category_compatibility": {
