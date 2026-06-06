@@ -74,6 +74,28 @@ def test_synthetic_acroform_clears_all_widgets(tmp_path: Path) -> None:
     assert leftovers == {}, f"widget values not cleared: {leftovers}"
 
 
+def test_synthetic_acroform_renders_empty(tmp_path: Path) -> None:
+    """Guards against the /DV regression: a PDF viewer that renders this
+    file (or our extracted text) must not see any of the original values.
+    """
+    import fitz
+
+    pdf = GOLDEN / "synthetic_supplier.pdf"
+    fields_json = GOLDEN / "synthetic_supplier.fields.json"
+
+    result = clear_acroform_widgets(pdf, fields_json, tmp_path)
+    text = fitz.open(result["blank_pdf"])[0].get_text()
+    for value in (
+        "Quorum Industries LLC",
+        "404 Harbour View",
+        "Paris",
+        "31-9970504",
+        "noah.evans@mailhost.net",
+        "Net 60",
+    ):
+        assert value not in text, f"{value!r} still rendered in blank PDF text"
+
+
 def test_synthetic_acroform_emits_labels(tmp_path: Path) -> None:
     pdf = GOLDEN / "synthetic_supplier.pdf"
     fields_json = GOLDEN / "synthetic_supplier.fields.json"

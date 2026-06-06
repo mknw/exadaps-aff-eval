@@ -45,16 +45,19 @@ def clear_acroform_widgets(
             if obj.get("/Subtype") != "/Widget":
                 continue
             removed_v = obj.pop("/V", None) is not None
+            # /DV is the field's *default* value — PDF viewers fall back to
+            # it when /V is missing, which makes the form re-appear filled.
+            removed_dv = obj.pop("/DV", None) is not None
             removed_ap = obj.pop("/AP", None) is not None
             mk = obj.get("/MK")
             removed_bg = False
             if mk is not None:
                 removed_bg = mk.pop("/BG", None) is not None
-            if removed_v or removed_ap or removed_bg:
+            if removed_v or removed_dv or removed_ap or removed_bg:
                 cleared += 1
 
     # Clear the AcroForm-level default value cache too, otherwise some
-    # viewers re-derive ``/V`` from ``/AcroForm/Fields``.
+    # viewers re-derive ``/V`` / ``/DV`` from ``/AcroForm/Fields``.
     root = writer._root_object  # pypdf has no public setter for this
     if "/AcroForm" in root:
         acroform = root["/AcroForm"].get_object()
@@ -62,6 +65,7 @@ def clear_acroform_widgets(
             for fref in acroform["/Fields"]:
                 fobj = fref.get_object()
                 fobj.pop("/V", None)
+                fobj.pop("/DV", None)
 
     blank_pdf = out_dir / "blank.pdf"
     with open(blank_pdf, "wb") as fh:
@@ -116,6 +120,8 @@ def residual_widget_values(pdf_path: str | Path) -> dict[str, str]:
             problems = []
             if "/V" in obj:
                 problems.append(f"V={obj['/V']!r}")
+            if "/DV" in obj:
+                problems.append(f"DV={obj['/DV']!r}")
             if "/AP" in obj:
                 problems.append("AP-present")
             mk = obj.get("/MK")
