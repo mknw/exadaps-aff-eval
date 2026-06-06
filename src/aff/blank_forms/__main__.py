@@ -31,8 +31,8 @@ def main() -> None:
     parser.add_argument("--dpi", type=int, default=DEFAULT_DPI)
     parser.add_argument("--only", action="append", default=None,
                         help="Restrict to one or more document ids.")
-    parser.add_argument("--inpaint", action="store_true",
-                        help="Use cv2.inpaint instead of flat fill for backgrounds.")
+    parser.add_argument("--debug-dir", default=None,
+                        help="Write per-page classifier-overlay PNGs under this directory.")
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest)
@@ -74,7 +74,7 @@ def main() -> None:
             fields_path,
             out_dir,
             dpi=args.dpi,
-            inpaint=args.inpaint,
+            debug_dir=args.debug_dir,
         )
         summary = {k: v for k, v in result.items() if k != "fields"}
         summary["field_count"] = result["redacted"]

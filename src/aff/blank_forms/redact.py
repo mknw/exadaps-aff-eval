@@ -1,125 +1,183 @@
-"""Line-aware text removal inside one answer bbox.
+"""Per-bbox redaction driver.
 
-The combined v2 strategy from the brief:
+For one answer bbox:
 
-1. Otsu-threshold the crop to get a foreground mask (text + rule ink).
-2. Morphologically open with a horizontal kernel to isolate ruling lines.
-3. text_mask = foreground & ~rule_mask
-4. Paint the bbox uniformly with the sampled background colour.
-5. Redraw the rule pixels at the inferred line colour.
+1. Build a search window around the bbox (hybrid expansion, see
+   :func:`_make_window` for the multiplier vs. floor trade-off).
+2. Classify ink pixels inside the window into text / h-rule / v-rule
+   via :func:`aff.blank_forms.classify.classify_window`.
+3. Extend the bbox along the same line via
+   :func:`aff.blank_forms.classify.expand_to_text_components` -- this
+   catches the funsd case where the annotation is shorter than the
+   rendered text.
+4. Sample paper colour from the strips around the *expanded* bbox.
+5. Write the sampled colour to every pixel marked as text in the
+   intersection of the window and the expanded bbox. Rules and
+   dividers are never touched.
 
-For "messy" backgrounds (gradients, half-tone, scan noise) where flat
-fill leaves a visible seam, ``redact_bbox`` accepts an ``inpaint=True``
-flag that swaps the flat fill for ``cv2.inpaint`` (Telea). Per the brief
-that's the fallback path, not the default — flat fill is faster and
-keeps the output text-OCR-free, which is what we care about.
+No paint-and-redraw. No flat fill of the whole bbox. If the classifier
+finds no text, we return ``strategy="noop_no_text"`` without writing.
+That surfaces grossly mis-annotated bboxes in the run manifest instead
+of stamping a destructive rectangle on top of the document.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-import cv2
 import numpy as np
 
-from aff.blank_forms.background import BackgroundSample, sample_background_color
+from aff.blank_forms.background import sample_background_color
+from aff.blank_forms.classify import (
+    Bbox,
+    Classification,
+    classify_window,
+    expand_to_text_components,
+)
 
-Bbox = tuple[int, int, int, int]
+
+@dataclass(slots=True, frozen=True)
+class DebugRecord:
+    """One classifier+expansion pair, captured for the debug overlay."""
+
+    seed_bbox: Bbox
+    expanded_bbox: Bbox
+    classification: Classification
 
 
 @dataclass(slots=True, frozen=True)
 class RedactStats:
+    """Per-bbox redaction outcome -- consumed by the run manifest."""
+
     text_pixels: int
-    rule_pixels: int
     bg_color: tuple[int, int, int]
-    line_color: tuple[int, int, int] | None
-    strategy: str  # "flat", "inpaint"
+    expanded_bbox: Bbox
+    text_components: int
+    strategy: str  # "fill" | "noop_no_text"
 
 
-def _horizontal_kernel_for(height: int) -> int:
-    """Pick a horizontal-rule detection kernel given the bbox height."""
-    return max(11, int(height * 1.2) | 1)
+def _make_window(
+    image: np.ndarray,
+    bbox: Bbox,
+    *,
+    expand_frac: float = 0.5,
+    min_expand_px: int = 10,
+) -> Bbox:
+    """Hybrid bbox expansion: fraction of bbox dims, floored at a pixel count.
 
-
-def _detect_rule_mask(binary_fg: np.ndarray, kernel_width: int) -> np.ndarray:
-    """Pixels belonging to long horizontal strokes (table rules, underlines)."""
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 1))
-    return cv2.morphologyEx(binary_fg, cv2.MORPH_OPEN, kernel)
-
-
-def _line_color_from_rules(crop_rgb: np.ndarray, rule_mask: np.ndarray) -> tuple[int, int, int] | None:
-    """Median colour of rule pixels in the original crop, or ``None`` if no rules."""
-    if rule_mask.sum() == 0:
-        return None
-    rule_pixels = crop_rgb[rule_mask > 0]
-    if rule_pixels.size == 0:
-        return None
-    med = np.median(rule_pixels, axis=0)
-    return (int(med[0]), int(med[1]), int(med[2]))
+    Pure-pixel expansion would either drown a 15-px funsd bbox in noise
+    or fail to reach text 50 px outside an xfund bbox. Pure-fraction
+    expansion would collapse to nothing on a 10-px checkbox. The hybrid
+    keeps both ends safe.
+    """
+    h, w = image.shape[:2]
+    bw = max(0, bbox[2] - bbox[0])
+    bh = max(0, bbox[3] - bbox[1])
+    dx = max(min_expand_px, round(bw * expand_frac))
+    dy = max(min_expand_px, round(bh * expand_frac))
+    return (
+        max(0, bbox[0] - dx),
+        max(0, bbox[1] - dy),
+        min(w, bbox[2] + dx),
+        min(h, bbox[3] + dy),
+    )
 
 
 def redact_bbox(
     image: np.ndarray,
     bbox: Bbox,
     *,
-    inpaint: bool = False,
-    inpaint_radius: int = 3,
+    classifier_kwargs: dict | None = None,
+    expand_kwargs: dict | None = None,
+    cc_kwargs: dict | None = None,
+    window_kwargs: dict | None = None,
+    debug_collector: list[DebugRecord] | None = None,
 ) -> RedactStats:
-    """Mutates ``image`` in place. Returns per-bbox statistics for logging."""
-    h, w = image.shape[:2]
-    x0, y0, x1, y1 = (
-        max(0, bbox[0]),
-        max(0, bbox[1]),
-        min(w, bbox[2]),
-        min(h, bbox[3]),
+    """Erase the answer text inside ``bbox``. Mutates ``image`` in place.
+
+    All kwargs are forwarded to the corresponding helper; defaults are
+    set in those helpers so this signature stays minimal. Pass
+    ``debug_collector`` (a mutable list) to capture a
+    :class:`DebugRecord` for later visualisation.
+    """
+    window = _make_window(image, bbox, **(window_kwargs or {}))
+    classification = classify_window(image, window, bbox, **(classifier_kwargs or {}))
+
+    expanded = expand_to_text_components(
+        classification,
+        bbox,
+        **(expand_kwargs or {}),
+        **(cc_kwargs or {}),
     )
-    if x1 <= x0 or y1 <= y0:
-        return RedactStats(0, 0, (255, 255, 255), None, "flat")
 
-    crop = image[y0:y1, x0:x1].copy()
-    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
-    _, binary_fg = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-    kernel_width = _horizontal_kernel_for(y1 - y0)
-    rule_mask = _detect_rule_mask(binary_fg, kernel_width)
-
-    text_mask = cv2.bitwise_and(binary_fg, cv2.bitwise_not(rule_mask))
-
-    line_color = _line_color_from_rules(crop, rule_mask)
-
-    if inpaint:
-        text_pixels_full = np.zeros((h, w), dtype=np.uint8)
-        text_pixels_full[y0:y1, x0:x1] = text_mask
-        rule_pixels_full = np.zeros((h, w), dtype=np.uint8)
-        rule_pixels_full[y0:y1, x0:x1] = rule_mask
-        inpainted = cv2.inpaint(image, text_pixels_full, inpaint_radius, cv2.INPAINT_TELEA)
-        image[y0:y1, x0:x1] = inpainted[y0:y1, x0:x1]
-        if line_color is not None:
-            mask = rule_mask > 0
-            sub = image[y0:y1, x0:x1]
-            sub[mask] = line_color
-            image[y0:y1, x0:x1] = sub
-        bg_sample = sample_background_color(image, (x0, y0, x1, y1))
-        return RedactStats(
-            text_pixels=int((text_mask > 0).sum()),
-            rule_pixels=int((rule_mask > 0).sum()),
-            bg_color=bg_sample.color,
-            line_color=line_color,
-            strategy="inpaint",
+    if debug_collector is not None:
+        debug_collector.append(
+            DebugRecord(seed_bbox=bbox, expanded_bbox=expanded, classification=classification)
         )
 
-    bg_sample: BackgroundSample = sample_background_color(image, (x0, y0, x1, y1))
-    sub = image[y0:y1, x0:x1]
-    sub[:] = bg_sample.color
-    if line_color is not None:
-        mask = rule_mask > 0
-        sub[mask] = line_color
-    image[y0:y1, x0:x1] = sub
+    text_total = int(classification.text_mask.sum() // 255)
+    if text_total == 0 or (expanded == bbox and not _any_overlap(classification, bbox)):
+        return RedactStats(
+            text_pixels=0,
+            bg_color=(255, 255, 255),
+            expanded_bbox=expanded,
+            text_components=0,
+            strategy="noop_no_text",
+        )
+
+    bg = sample_background_color(image, expanded)
+
+    wx0, wy0, wx1, wy1 = classification.window
+    ex0, ey0, ex1, ey1 = expanded
+    # Erase only where the expanded bbox and the window intersect.
+    ix0, iy0 = max(wx0, ex0), max(wy0, ey0)
+    ix1, iy1 = min(wx1, ex1), min(wy1, ey1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return RedactStats(
+            text_pixels=0,
+            bg_color=bg.color,
+            expanded_bbox=expanded,
+            text_components=0,
+            strategy="noop_no_text",
+        )
+
+    erase_mask = classification.text_mask[iy0 - wy0 : iy1 - wy0, ix0 - wx0 : ix1 - wx0]
+    region = image[iy0:iy1, ix0:ix1]
+    region[erase_mask > 0] = bg.color
+    image[iy0:iy1, ix0:ix1] = region
 
     return RedactStats(
-        text_pixels=int((text_mask > 0).sum()),
-        rule_pixels=int((rule_mask > 0).sum()),
-        bg_color=bg_sample.color,
-        line_color=line_color,
-        strategy="flat",
+        text_pixels=int((erase_mask > 0).sum()),
+        bg_color=bg.color,
+        expanded_bbox=expanded,
+        text_components=_count_components_inside(classification, expanded),
+        strategy="fill",
     )
+
+
+def _any_overlap(classification: Classification, bbox: Bbox) -> bool:
+    """True if any text pixel falls inside ``bbox``."""
+    wx0, wy0, wx1, wy1 = classification.window
+    bx0 = max(wx0, bbox[0]) - wx0
+    by0 = max(wy0, bbox[1]) - wy0
+    bx1 = min(wx1, bbox[2]) - wx0
+    by1 = min(wy1, bbox[3]) - wy0
+    if bx1 <= bx0 or by1 <= by0:
+        return False
+    return bool(classification.text_mask[by0:by1, bx0:bx1].any())
+
+
+def _count_components_inside(classification: Classification, bbox: Bbox) -> int:
+    """Approximate component count via a contour pass over the cropped text mask."""
+    import cv2
+
+    wx0, wy0, wx1, wy1 = classification.window
+    bx0 = max(wx0, bbox[0]) - wx0
+    by0 = max(wy0, bbox[1]) - wy0
+    bx1 = min(wx1, bbox[2]) - wx0
+    by1 = min(wy1, bbox[3]) - wy0
+    if bx1 <= bx0 or by1 <= by0:
+        return 0
+    sub = classification.text_mask[by0:by1, bx0:bx1]
+    contours, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    return len(contours)

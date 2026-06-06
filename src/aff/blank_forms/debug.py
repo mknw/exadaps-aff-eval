@@ -13,29 +13,19 @@ array back, ready to save as PNG.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image
 
-from aff.blank_forms.classify import Bbox, Classification
+from aff.blank_forms.redact import DebugRecord
 
 TEXT_COLOR = (255, 0, 0)
 H_RULE_COLOR = (0, 200, 0)
 V_RULE_COLOR = (0, 80, 255)
 SEED_BBOX_COLOR = (255, 215, 0)
 EXPANDED_BBOX_COLOR = (0, 220, 220)
-
-
-@dataclass(slots=True, frozen=True)
-class DebugRecord:
-    """One classifier run, captured for visualisation."""
-
-    seed_bbox: Bbox
-    expanded_bbox: Bbox
-    classification: Classification
 
 
 def _blend(canvas: np.ndarray, color: tuple[int, int, int], mask: np.ndarray, alpha: float) -> None:

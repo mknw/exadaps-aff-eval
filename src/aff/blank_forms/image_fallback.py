@@ -31,20 +31,28 @@ from PIL import Image
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, TextStringObject
 
-from aff.blank_forms.redact import RedactStats, redact_bbox
+from aff.blank_forms.debug import save_classification_debug
+from aff.blank_forms.redact import DebugRecord, RedactStats, redact_bbox
 
 DEFAULT_DPI = 300
 
-PER_SOURCE_PADDING: dict[str, tuple[int, int, int, int]] = {
+# Seed padding biases the search window left/right of the annotation
+# before the chain-based CC sweep takes over. Funsd / xfund_* annotations
+# are systematically narrower than the rendered text on their left edge;
+# the seed pad gives the window something to grab from. Defaults to a
+# 5-px uniform pad otherwise.
+# TODO(eval-lane): drop entirely once the CC sweep proves sufficient on
+# the full eval corpus.
+PER_SOURCE_SEED_PADDING: dict[str, tuple[int, int, int, int]] = {
     "funsd": (40, 5, 5, 5),
     "xfund_de": (30, 5, 5, 5),
     "xfund_fr": (30, 5, 5, 5),
 }
-DEFAULT_PADDING: tuple[int, int, int, int] = (5, 5, 5, 5)
+DEFAULT_SEED_PADDING: tuple[int, int, int, int] = (5, 5, 5, 5)
 
 
 def _padding_for(source: str) -> tuple[int, int, int, int]:
-    return PER_SOURCE_PADDING.get(source, DEFAULT_PADDING)
+    return PER_SOURCE_SEED_PADDING.get(source, DEFAULT_SEED_PADDING)
 
 
 def _bbox_norm_to_px(
@@ -124,7 +132,7 @@ def generate_blank(
     out_dir: str | Path,
     *,
     dpi: int = DEFAULT_DPI,
-    inpaint: bool = False,
+    debug_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Generate a blanked image-PDF for one document.
 
@@ -169,12 +177,18 @@ def generate_blank(
             continue
         by_page.setdefault(int(fld.get("page", 0)), []).append(fld)
 
+    debug_root = Path(debug_dir) if debug_dir else None
     per_field_stats: list[dict[str, Any]] = []
     for page_idx, page_arr in enumerate(pages):
         h, w = page_arr.shape[:2]
+        pre_page = page_arr.copy() if debug_root else None
+        debug_collector: list[DebugRecord] | None = [] if debug_root else None
+
         for fld in by_page.get(page_idx, []):
             bbox_px = _bbox_norm_to_px(fld["bbox_norm"], w, h, padding)
-            stats: RedactStats = redact_bbox(page_arr, bbox_px, inpaint=inpaint)
+            stats: RedactStats = redact_bbox(
+                page_arr, bbox_px, debug_collector=debug_collector
+            )
             per_field_stats.append(
                 {
                     "field_id": fld["field_id"],
@@ -182,6 +196,13 @@ def generate_blank(
                     "bbox_px": list(bbox_px),
                     **asdict(stats),
                 }
+            )
+
+        if debug_root and debug_collector and pre_page is not None:
+            save_classification_debug(
+                pre_page,
+                debug_collector,
+                debug_root / f"{doc_id}_p{page_idx}_classify.png",
             )
 
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -29,7 +29,8 @@ import numpy as np
 from PIL import Image
 
 from aff.blank_forms.classify import classify_window, expand_to_text_components
-from aff.blank_forms.debug import DebugRecord, save_classification_debug
+from aff.blank_forms.debug import save_classification_debug
+from aff.blank_forms.redact import DebugRecord
 
 ROOT = Path(__file__).resolve().parents[3]
 GOLDEN = ROOT / "tests" / "fixtures" / "golden_set"
