@@ -29,6 +29,9 @@ build/
 *.tiff
 *.png
 
+# Image-fallback approach: blank-form outputs
+out/
+
 # Exception: golden-set fixtures are committed
 !tests/fixtures/golden_set/**
 
