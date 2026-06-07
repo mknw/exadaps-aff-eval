@@ -1,12 +1,14 @@
 """Build a synth-dataset manifest from VRDU subsets.
 
 Given ``data/raw/vrdu/{ad-buy,registration}-form/``, classify every PDF,
-filter to the two categories ``pymupdf-redact`` can process, and write a
-manifest the existing ``aff.blank_forms`` CLI consumes without modification.
+filter to the two categories ``pymupdf-redact`` can process, optionally
+random-sample to a smaller set, and write a manifest the existing
+``aff.blank_forms`` CLI consumes without modification.
 
 Output layout (under ``out_root``)::
 
     manifest.json
+    sample_v1.json                    # only when --sample-size given
     ad_buy/<doc_id>.fields.json
     registration/<doc_id>.fields.json
 
@@ -18,6 +20,7 @@ copy step — ``Path.__truediv__`` treats an absolute RHS as absolute.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -26,6 +29,7 @@ import structlog
 from aff.ingest.vrdu import parse_subset
 from aff.schema import DocumentRecord
 from aff.synth.classify import PdfClassification, classify_pdf
+from aff.synth.sample import select_sample, sources_breakdown, write_sample_metadata
 
 log = structlog.get_logger()
 
@@ -43,73 +47,32 @@ _PROCESSABLE = {"born_digital_pdf", "synthetic_acroform"}
 MANIFEST_VERSION = 1
 
 
-def _doc_record_to_fields_json(record: DocumentRecord) -> dict:
-    """Serialise a ``DocumentRecord`` to the shape ``pymupdf_redact`` reads.
-
-    Matches the golden-set ``*.fields.json`` schema (full ``to_dict``
-    payload, including ``gt_payload`` and per-field ``has_response``).
-    """
-    return record.to_dict()
+@dataclass(slots=True)
+class _Candidate:
+    record: DocumentRecord
+    classification: PdfClassification
+    subset_subdir: str
 
 
-def _manifest_entry(
-    record: DocumentRecord,
-    cls: PdfClassification,
-    subset_subdir: str,
-) -> dict:
-    fields_json_rel = f"{subset_subdir}/{record.doc_id}.fields.json"
-    return {
-        "id": record.doc_id,
-        "category": cls.category,
-        "source": record.source,
-        "doc_id": record.doc_id,
-        "pdf": record.pdf_path,  # absolute; resolves under any --golden-set
-        "image": None,
-        "fields_json": fields_json_rel,
-        "notes": "",
-        "page_count": cls.page_count,
-        "text_char_count": cls.text_char_count,
-        "widget_count": cls.widget_count,
-    }
-
-
-def build_manifest(
+def _collect_candidates(
     data_root: Path,
-    out_root: Path,
-    sources: list[str] | None = None,
-) -> Path:
-    """Classify VRDU, filter to processable categories, write the manifest.
-
-    Returns the path to ``manifest.json``. Per-doc ``fields.json`` files
-    are written alongside under ``ad_buy/`` / ``registration/``
-    subdirectories.
-
-    ``sources`` lets the caller restrict the build to a subset (e.g.
-    ``["vrdu_ad_buy"]``). ``None`` (the default) processes both VRDU
-    subsets.
-    """
-    # Resolve so manifest `pdf` paths are absolute regardless of CLI cwd.
-    data_root = Path(data_root).resolve()
-    out_root = Path(out_root)
-    out_root.mkdir(parents=True, exist_ok=True)
-
+    selected_sources: list[str],
+) -> tuple[list[_Candidate], dict[str, int]]:
+    """Walk requested VRDU subsets, classify each PDF, return processable ones."""
     vrdu_dir = data_root / "raw" / "vrdu"
-    # parse_subset takes img_dir but render_pages=False skips it; pass a
-    # placeholder rather than touching the filesystem.
+    # parse_subset accepts img_dir but render_pages=False skips writes; pass
+    # a placeholder rather than touching the filesystem.
     img_dir = data_root / "raw" / "vrdu_images"
-
-    selected = sources if sources is not None else list(SUBSETS)
     seen_sha256: set[str] = set()
-
-    documents: list[dict] = []
     counts: dict[str, int] = {
         "born_digital_pdf": 0,
         "synthetic_acroform": 0,
         "image_only_pdf": 0,
         "error": 0,
     }
+    candidates: list[_Candidate] = []
 
-    for source in selected:
+    for source in selected_sources:
         if source not in SUBSETS:
             log.warning("synth.build_manifest.unknown_source", source=source)
             continue
@@ -122,9 +85,6 @@ def build_manifest(
             seen_sha256,
             render_pages=False,
         )
-        out_subdir = out_root / subset_subdir
-        out_subdir.mkdir(parents=True, exist_ok=True)
-
         for record in records:
             if not record.pdf_path:
                 continue
@@ -141,12 +101,51 @@ def build_manifest(
             counts[cls.category] += 1
             if cls.category not in _PROCESSABLE:
                 continue
+            candidates.append(_Candidate(record, cls, subset_subdir))
 
-            fields_json_path = out_subdir / f"{record.doc_id}.fields.json"
-            fields_json_path.write_text(
-                json.dumps(_doc_record_to_fields_json(record), indent=2)
-            )
-            documents.append(_manifest_entry(record, cls, subset_subdir))
+    return candidates, counts
+
+
+def _manifest_entry(candidate: _Candidate) -> dict:
+    record, cls, subset_subdir = candidate.record, candidate.classification, candidate.subset_subdir
+    return {
+        "id": record.doc_id,
+        "category": cls.category,
+        "source": record.source,
+        "doc_id": record.doc_id,
+        "pdf": record.pdf_path,  # absolute; resolves under any --golden-set
+        "image": None,
+        "fields_json": f"{subset_subdir}/{record.doc_id}.fields.json",
+        "notes": "",
+        "page_count": cls.page_count,
+        "text_char_count": cls.text_char_count,
+        "widget_count": cls.widget_count,
+    }
+
+
+def _write_outputs(
+    out_root: Path,
+    candidates: list[_Candidate],
+    classified_counts: dict[str, int],
+    selected_sources: list[str],
+    sampled_from_total: int | None = None,
+) -> Path:
+    """Write per-doc fields.json + manifest.json for the given candidates."""
+    documents: list[dict] = []
+    for cand in candidates:
+        out_subdir = out_root / cand.subset_subdir
+        out_subdir.mkdir(parents=True, exist_ok=True)
+        fields_json_path = out_subdir / f"{cand.record.doc_id}.fields.json"
+        fields_json_path.write_text(json.dumps(cand.record.to_dict(), indent=2))
+        documents.append(_manifest_entry(cand))
+
+    build_stats: dict = {
+        "sources": selected_sources,
+        "classified": dict(classified_counts),
+        "included": len(documents),
+    }
+    if sampled_from_total is not None:
+        build_stats["sampled_from_total"] = sampled_from_total
 
     manifest = {
         "version": MANIFEST_VERSION,
@@ -160,21 +159,80 @@ def build_manifest(
             "synthetic_acroform": ["pymupdf-redact"],
             "born_digital_pdf": ["pymupdf-redact"],
         },
-        "build_stats": {
-            "sources": selected,
-            "classified": dict(counts),
-            "included": len(documents),
-        },
+        "build_stats": build_stats,
     }
     manifest_path = out_root / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
+    return manifest_path
+
+
+def build_manifest(
+    data_root: Path,
+    out_root: Path,
+    sources: list[str] | None = None,
+    sample_size: int | None = None,
+    seed: int = 0,
+    exclude: set[str] | None = None,
+) -> Path:
+    """Classify VRDU, filter to processable categories, optionally sample, write.
+
+    Returns the path to ``manifest.json``. Per-doc ``fields.json`` files
+    land alongside under ``ad_buy/`` / ``registration/``.
+
+    When ``sample_size`` is given, the manifest is restricted to a
+    deterministic stratified sample of that size and ``sample_v1.json``
+    is written next to ``manifest.json`` recording the selection.
+    """
+    data_root = Path(data_root).resolve()
+    out_root = Path(out_root)
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    selected_sources = sources if sources is not None else list(SUBSETS)
+    candidates, classified_counts = _collect_candidates(data_root, selected_sources)
+
+    sampled_from_total: int | None = None
+    if sample_size is not None:
+        proto_manifest = {"documents": [_manifest_entry(c) for c in candidates]}
+        chosen = set(
+            select_sample(proto_manifest, sample_size, seed, exclude=exclude)
+        )
+        sampled_from_total = len(candidates)
+        candidates = [c for c in candidates if c.record.doc_id in chosen]
+
+        breakdown = sources_breakdown(proto_manifest, chosen)
+        write_sample_metadata(
+            out_root / "sample_v1.json",
+            chosen=sorted(chosen),
+            seed=seed,
+            n_requested=sample_size,
+            excluded_from=sorted(exclude) if exclude else [],
+            sources_breakdown=breakdown,
+        )
+
+    manifest_path = _write_outputs(
+        out_root,
+        candidates,
+        classified_counts,
+        selected_sources,
+        sampled_from_total=sampled_from_total,
+    )
     log.info(
         "synth.build_manifest.complete",
-        included=len(documents),
-        counts=counts,
+        included=len(candidates),
+        classified=classified_counts,
+        sampled_from_total=sampled_from_total,
         path=str(manifest_path),
     )
     return manifest_path
+
+
+def _parse_exclude(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    p = Path(value)
+    if p.is_file():
+        return {ln.strip() for ln in p.read_text().splitlines() if ln.strip()}
+    return {tok.strip() for tok in value.split(",") if tok.strip()}
 
 
 @click.command()
@@ -202,9 +260,49 @@ def build_manifest(
         f"(any of {', '.join(SUBSETS)}). Default: both."
     ),
 )
-def main(data_root: Path, out_root: Path, sources: str | None) -> None:
+@click.option(
+    "--sample-size",
+    "sample_size",
+    type=int,
+    default=None,
+    help="If set, restrict the manifest to this many docs (deterministic).",
+)
+@click.option(
+    "--seed",
+    "seed",
+    type=int,
+    default=0,
+    show_default=True,
+    help="RNG seed for sampling.",
+)
+@click.option(
+    "--exclude",
+    "exclude",
+    type=str,
+    default=None,
+    help=(
+        "Doc IDs to skip during sampling. Either a comma-separated list "
+        "or a path to a newline-delimited file."
+    ),
+)
+def main(
+    data_root: Path,
+    out_root: Path,
+    sources: str | None,
+    sample_size: int | None,
+    seed: int,
+    exclude: str | None,
+) -> None:
     src_list = [s.strip() for s in sources.split(",")] if sources else None
-    path = build_manifest(data_root, out_root, sources=src_list)
+    exclude_set = _parse_exclude(exclude)
+    path = build_manifest(
+        data_root,
+        out_root,
+        sources=src_list,
+        sample_size=sample_size,
+        seed=seed,
+        exclude=exclude_set,
+    )
     click.echo(f"wrote {path}")
 
 

@@ -1,10 +1,13 @@
-"""Synth-dataset orchestration: classify, sample, run, analyze.
+"""Synth-dataset orchestration: classify, sample, run, preview, analyze.
 
-Picks the VRDU PDFs the existing ``aff.blank_forms`` CLI can process and
-prepares the manifests it consumes.
+Submodules:
+
+* ``classify``         — ``classify_pdf`` + ``PdfClassification``
+* ``build_manifest``   — pick processable VRDU PDFs, optionally sample, write manifest
+* ``sample``           — stratified deterministic ``select_sample``
+* ``preview``          — recolor-glyph preview PDFs for visual QA
+* ``combine``          — concatenate per-doc PDFs into one scrollable file
+
+Submodules are not re-exported here; ``python -m aff.synth.<module>``
+runs each CLI cleanly without double-import warnings.
 """
-
-from aff.synth.build_manifest import build_manifest
-from aff.synth.classify import PdfClassification, classify_pdf
-
-__all__ = ["PdfClassification", "build_manifest", "classify_pdf"]
