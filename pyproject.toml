@@ -6,6 +6,8 @@ requires-python = ">=3.14"
 dependencies = [
     "click>=8.1.7",
     "datasets>=2.19.0",
+    "numpy>=2.4.6",
+    "opencv-python-headless>=4.13.0.92",
     "pandas>=2.2.0",
     "pillow>=10.3.0",
     "pyarrow>=16.0.0",
@@ -50,6 +52,13 @@ ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pylint.typecheck]
+# opencv-python's bindings are generated dynamically -- pylint can't
+# introspect them even with extension-pkg-allow-list. Treat every cv2
+# attribute as runtime-generated so we don't have to scatter
+# # pylint: disable=no-member across the classifier.
+generated-members = ["cv2.*"]
 
 [dependency-groups]
 dev = [
