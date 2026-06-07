@@ -53,6 +53,13 @@ ignore = ["E501"]
 [tool.ruff.format]
 quote-style = "double"
 
+[tool.pylint.typecheck]
+# opencv-python's bindings are generated dynamically -- pylint can't
+# introspect them even with extension-pkg-allow-list. Treat every cv2
+# attribute as runtime-generated so we don't have to scatter
+# # pylint: disable=no-member across the classifier.
+generated-members = ["cv2.*"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.2.0",
