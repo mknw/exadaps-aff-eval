@@ -164,9 +164,12 @@ def generate_blank(
             for rect in rects:
                 page.add_redact_annot(rect, fill=None)
             page.apply_redactions(
-                text=fitz.PDF_REDACT_TEXT_REMOVE,
-                graphics=fitz.PDF_REDACT_LINE_ART_NONE,
-                images=fitz.PDF_REDACT_IMAGE_NONE,
+                # pylint can't see PDF_REDACT_* members — fitz's __init__
+                # does `from pymupdf import *`, which static analysis won't
+                # follow. The constants exist at runtime; suppress per-line.
+                text=fitz.PDF_REDACT_TEXT_REMOVE,  # pylint: disable=no-member
+                graphics=fitz.PDF_REDACT_LINE_ART_NONE,  # pylint: disable=no-member
+                images=fitz.PDF_REDACT_IMAGE_NONE,  # pylint: disable=no-member
             )
 
         blank_pdf = out_dir / "blank.pdf"

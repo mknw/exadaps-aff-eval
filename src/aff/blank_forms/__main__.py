@@ -92,4 +92,6 @@ def main(golden_set: Path, out_dir: Path) -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    # Click's decorators inject the CLI args at call time — pylint can't see
+    # that, so it flags this as a no-value-for-parameter error.
+    main()  # pylint: disable=no-value-for-parameter
