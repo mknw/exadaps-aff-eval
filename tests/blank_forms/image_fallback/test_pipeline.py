@@ -21,9 +21,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from aff.blank_forms import generate_blank
+from aff.blank_forms.image_fallback import generate_blank
 
-GOLDEN = Path(__file__).resolve().parents[1] / "fixtures" / "golden_set"
+GOLDEN = Path(__file__).resolve().parents[2] / "fixtures" / "golden_set"
 
 IMAGE_FIXTURES: list[tuple[str, str, str, int]] = [
     ("funsd", "funsd", ".png", 5),

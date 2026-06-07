@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from aff.blank_forms.classify import Classification, classify_window
+from aff.blank_forms.image_fallback.classify import Classification, classify_window
 
 PAPER = 250
 INK = 30

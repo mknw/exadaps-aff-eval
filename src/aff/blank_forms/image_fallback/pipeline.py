@@ -31,8 +31,8 @@ from PIL import Image
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, TextStringObject
 
-from aff.blank_forms.debug import save_classification_debug
-from aff.blank_forms.redact import DebugRecord, RedactStats, redact_bbox
+from aff.blank_forms.image_fallback.debug import save_classification_debug
+from aff.blank_forms.image_fallback.redact import DebugRecord, RedactStats, redact_bbox
 
 DEFAULT_DPI = 300
 

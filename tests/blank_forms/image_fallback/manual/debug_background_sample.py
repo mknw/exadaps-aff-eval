@@ -19,9 +19,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from aff.blank_forms.background import sample_background_color
+from aff.blank_forms.image_fallback.background import sample_background_color
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[4]
 GOLDEN = ROOT / "tests" / "fixtures" / "golden_set"
 OUT = ROOT / "out" / "debug"
 

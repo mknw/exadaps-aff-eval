@@ -7,8 +7,8 @@ Reads ``tests/fixtures/golden_set/manifest.json`` and applies
 plus ``out/golden_set/manifest.jsonl`` summarising the run.
 
 Usage:
-    nix develop --command uv run python -m aff.blank_forms
-    nix develop --command uv run python -m aff.blank_forms --dpi 150
+    nix develop --command uv run python -m aff.blank_forms.image_fallback
+    nix develop --command uv run python -m aff.blank_forms.image_fallback --dpi 150
 """
 
 from __future__ import annotations
@@ -17,9 +17,10 @@ import argparse
 import json
 from pathlib import Path
 
-from aff.blank_forms.image_fallback import DEFAULT_DPI, generate_blank
+from aff.blank_forms.image_fallback import generate_blank
+from aff.blank_forms.image_fallback.pipeline import DEFAULT_DPI
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[4]
 GOLDEN_DIR = ROOT / "tests" / "fixtures" / "golden_set"
 DEFAULT_OUT_ROOT = ROOT / "out" / "golden_set"
 

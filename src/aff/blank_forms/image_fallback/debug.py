@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from aff.blank_forms.redact import DebugRecord
+from aff.blank_forms.image_fallback.redact import DebugRecord
 
 TEXT_COLOR = (255, 0, 0)
 H_RULE_COLOR = (0, 200, 0)

@@ -28,11 +28,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from aff.blank_forms.classify import classify_window, expand_to_text_components
-from aff.blank_forms.debug import save_classification_debug
-from aff.blank_forms.redact import DebugRecord
+from aff.blank_forms.image_fallback.classify import classify_window
+from aff.blank_forms.image_fallback.debug import save_classification_debug
+from aff.blank_forms.image_fallback.redact import DebugRecord
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[4]
 GOLDEN = ROOT / "tests" / "fixtures" / "golden_set"
 OUT = ROOT / "out" / "debug" / "classify"
 
@@ -105,8 +105,7 @@ def main() -> None:
         )
         window = _seed_window(bbox, (h, w))
         cls = classify_window(image, window, bbox)
-        expanded = expand_to_text_components(cls, bbox)
-        records.append(DebugRecord(seed_bbox=bbox, expanded_bbox=expanded, classification=cls))
+        records.append(DebugRecord(seed_bbox=bbox, classification=cls))
 
     out_path = save_classification_debug(image, records, OUT / f"{args.doc}_classify.png")
     print(f"wrote {out_path} | {len(records)} bbox classifications")

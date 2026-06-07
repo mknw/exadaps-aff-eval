@@ -35,8 +35,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from aff.blank_forms.background import sample_background_color
-from aff.blank_forms.classify import Bbox, Classification, classify_window
+from aff.blank_forms.image_fallback.background import sample_background_color
+from aff.blank_forms.image_fallback.classify import Bbox, Classification, classify_window
 
 
 @dataclass(slots=True, frozen=True)
