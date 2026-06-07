@@ -1,9 +1,10 @@
 # Golden set
 
-Five representative documents used by every blank-form generation approach
-under exploration. Each approach worktree reads `manifest.json`, applies its
-assigned technique to compatible documents (per `category_compatibility`),
-and emits one blank PDF + one `.labels.json` per processed document.
+Eight curated documents used by every blank-form generation approach
+under exploration. Each approach worktree reads `manifest.json`, applies
+its assigned technique to compatible documents (per
+`category_compatibility`), and emits one blank PDF + one `.labels.json`
+per processed document.
 
 ## Documents
 
@@ -14,6 +15,12 @@ and emits one blank PDF + one `.labels.json` per processed document.
 | `vrdu_scan.pdf` | `image_only_pdf` | vrdu_ad_buy | Single image XObject covering the page. Structural approaches must fall through to image fallback. |
 | `funsd.png` | `image_only_png` | funsd | Greyscale scan, underline-style fields, mixed handwriting. |
 | `xfund_de.png` | `image_only_png` | xfund_de | High-res RGB scan, table grids with light gray borders. The harder image case. |
+| `xfund_de_train_2.png` | `image_only_png` | xfund_de | Cell-by-cell character input (one glyph per box). Stresses image-fallback's tight per-character bboxes. |
+| `xfund_de_train_49.png` | `image_only_png` | xfund_de | Different XFUND-DE layout from train_2 / train_23 for variety. |
+| `xfund_fr_train_21.png` | `image_only_png` | xfund_fr | French — cell-by-cell input + checkbox markers; 59 answers, the densest in the set. |
+
+See `CANDIDATES.md` for the curation log (what was considered, what was
+removed, why).
 
 ## Field JSONs
 

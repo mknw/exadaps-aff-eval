@@ -43,6 +43,9 @@ out/
 .idea/
 *.swp
 
+# macOS
+.DS_Store
+
 # Coverage
 .coverage
 htmlcov/
