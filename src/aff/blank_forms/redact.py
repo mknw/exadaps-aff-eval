@@ -1,47 +1,49 @@
 """Per-bbox redaction driver.
 
-For one answer bbox:
+For one answer bbox (the dataset's "yellow" seed bbox):
 
 1. Build a search window around the bbox (hybrid expansion, see
-   :func:`_make_window` for the multiplier vs. floor trade-off).
+   :func:`_make_window`). The window is wider than the bbox so the
+   classifier sees enough surrounding context to detect h-rules /
+   v-dividers that pass through the bbox.
 2. Classify ink pixels inside the window into text / h-rule / v-rule
    via :func:`aff.blank_forms.classify.classify_window`.
-3. Extend the bbox along the same line via
-   :func:`aff.blank_forms.classify.expand_to_text_components` -- this
-   catches the funsd case where the annotation is shorter than the
-   rendered text.
-4. Sample paper colour from the strips around the *expanded* bbox.
-5. Write the sampled colour to every pixel marked as text in the
-   intersection of the window and the expanded bbox. Rules and
-   dividers are never touched.
+3. Sample paper colour from the strips around the seed bbox.
+4. Write the sampled colour to every text-mask pixel inside the SEED
+   bbox only. Rules, dividers, and anything outside the yellow box are
+   never touched.
 
-No paint-and-redraw. No flat fill of the whole bbox. If the classifier
-finds no text, we return ``strategy="noop_no_text"`` without writing.
-That surfaces grossly mis-annotated bboxes in the run manifest instead
-of stamping a destructive rectangle on top of the document.
+Strict-yellow scope: we redact only inside the dataset's annotation.
+A previous design chain-expanded the bbox via connected-components to
+catch misannotated leading text (e.g. funsd "H. L. Williams" where the
+annotation only covers "Williams"). That risked redacting form
+structure outside the seed; we've dropped it in favour of fidelity to
+the annotation. Mis-annotated cases now surface as residual text in
+the output -- documented limitation; the right fix is at the
+annotation layer, not here.
+
+If the classifier finds no text inside the seed bbox we return
+``strategy="noop_no_text"`` without writing. That keeps the run
+manifest honest about grossly mis-annotated bboxes (vrdu_born_digital's
+zero-area annotations are the canonical case).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 from aff.blank_forms.background import sample_background_color
-from aff.blank_forms.classify import (
-    Bbox,
-    Classification,
-    classify_window,
-    expand_to_text_components,
-)
+from aff.blank_forms.classify import Bbox, Classification, classify_window
 
 
 @dataclass(slots=True, frozen=True)
 class DebugRecord:
-    """One classifier+expansion pair, captured for the debug overlay."""
+    """One redaction call, captured for the overlay."""
 
     seed_bbox: Bbox
-    expanded_bbox: Bbox
     classification: Classification
 
 
@@ -51,7 +53,6 @@ class RedactStats:
 
     text_pixels: int
     bg_color: tuple[int, int, int]
-    expanded_bbox: Bbox
     text_components: int
     strategy: str  # "fill" | "noop_no_text"
 
@@ -65,8 +66,13 @@ def _make_window(
 ) -> Bbox:
     """Hybrid bbox expansion: fraction of bbox dims, floored at a pixel count.
 
+    The window is the area the classifier sees -- wider than the seed so
+    long structural rules passing through the seed are visible at full
+    extent and classified correctly. The window does NOT define the
+    erase region; that's strictly the seed bbox.
+
     Pure-pixel expansion would either drown a 15-px funsd bbox in noise
-    or fail to reach text 50 px outside an xfund bbox. Pure-fraction
+    or fail to give a 50-px xfund bbox enough rule context. Pure-fraction
     expansion would collapse to nothing on a 10-px checkbox. The hybrid
     keeps both ends safe.
     """
@@ -88,96 +94,67 @@ def redact_bbox(
     bbox: Bbox,
     *,
     classifier_kwargs: dict | None = None,
-    expand_kwargs: dict | None = None,
-    cc_kwargs: dict | None = None,
     window_kwargs: dict | None = None,
     debug_collector: list[DebugRecord] | None = None,
 ) -> RedactStats:
-    """Erase the answer text inside ``bbox``. Mutates ``image`` in place.
+    """Erase the answer text inside the seed ``bbox``. Mutates ``image`` in place.
 
-    All kwargs are forwarded to the corresponding helper; defaults are
-    set in those helpers so this signature stays minimal. Pass
-    ``debug_collector`` (a mutable list) to capture a
-    :class:`DebugRecord` for later visualisation.
+    Pass ``debug_collector`` (a mutable list) to capture a
+    :class:`DebugRecord` for later overlay rendering.
     """
-    window = _make_window(image, bbox, **(window_kwargs or {}))
-    classification = classify_window(image, window, bbox, **(classifier_kwargs or {}))
+    h, w = image.shape[:2]
+    sx0 = max(0, min(bbox[0], w))
+    sy0 = max(0, min(bbox[1], h))
+    sx1 = max(0, min(bbox[2], w))
+    sy1 = max(0, min(bbox[3], h))
+    seed = (sx0, sy0, sx1, sy1)
 
-    expanded = expand_to_text_components(
-        classification,
-        bbox,
-        **(expand_kwargs or {}),
-        **(cc_kwargs or {}),
-    )
+    window = _make_window(image, seed, **(window_kwargs or {}))
+    classification = classify_window(image, window, seed, **(classifier_kwargs or {}))
 
     if debug_collector is not None:
-        debug_collector.append(
-            DebugRecord(seed_bbox=bbox, expanded_bbox=expanded, classification=classification)
-        )
+        debug_collector.append(DebugRecord(seed_bbox=seed, classification=classification))
 
-    text_total = int(classification.text_mask.sum() // 255)
-    if text_total == 0 or (expanded == bbox and not _any_overlap(classification, bbox)):
+    if sx1 <= sx0 or sy1 <= sy0:
         return RedactStats(
             text_pixels=0,
             bg_color=(255, 255, 255),
-            expanded_bbox=expanded,
             text_components=0,
             strategy="noop_no_text",
         )
 
-    bg = sample_background_color(image, expanded)
+    # Crop the text mask to the seed bbox (in window coordinates).
+    wx0, wy0, _wx1, _wy1 = classification.window
+    rx0 = sx0 - wx0
+    ry0 = sy0 - wy0
+    rx1 = sx1 - wx0
+    ry1 = sy1 - wy0
+    erase_mask = classification.text_mask[ry0:ry1, rx0:rx1]
+    text_pixels = int((erase_mask > 0).sum())
 
-    wx0, wy0, wx1, wy1 = classification.window
-    ex0, ey0, ex1, ey1 = expanded
-    # Erase only where the expanded bbox and the window intersect.
-    ix0, iy0 = max(wx0, ex0), max(wy0, ey0)
-    ix1, iy1 = min(wx1, ex1), min(wy1, ey1)
-    if ix1 <= ix0 or iy1 <= iy0:
+    if text_pixels == 0:
         return RedactStats(
             text_pixels=0,
-            bg_color=bg.color,
-            expanded_bbox=expanded,
+            bg_color=(255, 255, 255),
             text_components=0,
             strategy="noop_no_text",
         )
 
-    erase_mask = classification.text_mask[iy0 - wy0 : iy1 - wy0, ix0 - wx0 : ix1 - wx0]
-    region = image[iy0:iy1, ix0:ix1]
+    bg = sample_background_color(image, seed)
+    region = image[sy0:sy1, sx0:sx1]
     region[erase_mask > 0] = bg.color
-    image[iy0:iy1, ix0:ix1] = region
+    image[sy0:sy1, sx0:sx1] = region
 
     return RedactStats(
-        text_pixels=int((erase_mask > 0).sum()),
+        text_pixels=text_pixels,
         bg_color=bg.color,
-        expanded_bbox=expanded,
-        text_components=_count_components_inside(classification, expanded),
+        text_components=_count_components(erase_mask),
         strategy="fill",
     )
 
 
-def _any_overlap(classification: Classification, bbox: Bbox) -> bool:
-    """True if any text pixel falls inside ``bbox``."""
-    wx0, wy0, wx1, wy1 = classification.window
-    bx0 = max(wx0, bbox[0]) - wx0
-    by0 = max(wy0, bbox[1]) - wy0
-    bx1 = min(wx1, bbox[2]) - wx0
-    by1 = min(wy1, bbox[3]) - wy0
-    if bx1 <= bx0 or by1 <= by0:
-        return False
-    return bool(classification.text_mask[by0:by1, bx0:bx1].any())
-
-
-def _count_components_inside(classification: Classification, bbox: Bbox) -> int:
-    """Approximate component count via a contour pass over the cropped text mask."""
-    import cv2
-
-    wx0, wy0, wx1, wy1 = classification.window
-    bx0 = max(wx0, bbox[0]) - wx0
-    by0 = max(wy0, bbox[1]) - wy0
-    bx1 = min(wx1, bbox[2]) - wx0
-    by1 = min(wy1, bbox[3]) - wy0
-    if bx1 <= bx0 or by1 <= by0:
+def _count_components(mask: np.ndarray) -> int:
+    if mask.size == 0:
         return 0
-    sub = classification.text_mask[by0:by1, bx0:bx1]
-    contours, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     return len(contours)

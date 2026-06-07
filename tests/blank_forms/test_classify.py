@@ -1,23 +1,19 @@
 """Synthetic-strip tests for the pixel classifier.
 
-Each test builds a tiny numpy image, runs ``classify_window`` (and
-sometimes ``expand_to_text_components``), and asserts one structural
-fact. No fixture I/O — the goal is to lock in the kernel/morphology
-contract independent of any specific document.
+Each test builds a tiny numpy image, runs ``classify_window``, and
+asserts one structural fact. No fixture I/O -- the goal is to lock in
+the kernel/morphology contract independent of any specific document.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from aff.blank_forms.classify import (
-    Classification,
-    classify_window,
-    expand_to_text_components,
-)
+from aff.blank_forms.classify import Classification, classify_window
 
 PAPER = 250
 INK = 30
+GREY = 130  # well below paper, above Otsu threshold for a paper-dominated crop
 
 
 def _blank(h: int, w: int) -> np.ndarray:
@@ -40,7 +36,7 @@ def test_classify_window_isolates_horizontal_rule_at_funsd_scale() -> None:
     assert cls.h_rule_mask.sum() > 0
     assert cls.text_mask.sum() > 0
     assert int(np.logical_and(cls.text_mask, cls.h_rule_mask).sum()) == 0
-    # The text_mask should cover the glyphs, not the rule
+    # Glyph pixels should be in text_mask, not in the rule
     assert cls.text_mask[10:22, 10:18].any()
     assert not cls.text_mask[25:26, :].any()
 
@@ -55,11 +51,29 @@ def test_classify_window_isolates_vertical_divider() -> None:
     cls = classify_window(img, (0, 0, 80, 80), bbox)
 
     assert cls.v_rule_mask.sum() > 0
-    # Divider pixels are present in v_rule_mask
     assert cls.v_rule_mask[:, 39:40].any()
     # Glyph pixels are not classified as v_rule
     assert not cls.v_rule_mask[30:60, 10:25].any()
     assert not cls.v_rule_mask[30:60, 55:70].any()
+
+
+def test_classify_window_top_hat_catches_grey_divider() -> None:
+    """A faint grey divider must be detected by top-hat, even when Otsu drops it.
+
+    The xfund_de_train_2 cell dividers sit around 120-150 grey, near
+    Otsu's threshold. Top-hat on grayscale catches them regardless.
+    """
+    img = _blank(80, 80)
+    # Faint grey divider -- inked at GREY=130, not solid INK=30
+    _paint_rect(img, 39, 10, 40, 70, value=GREY)
+    # Dark glyphs around it
+    _paint_rect(img, 10, 30, 25, 60)
+    _paint_rect(img, 55, 30, 70, 60)
+
+    bbox = (5, 25, 75, 65)
+    cls = classify_window(img, (0, 0, 80, 80), bbox)
+
+    assert cls.v_rule_mask[:, 39:40].sum() > 0, "faint grey divider must register as v_rule"
 
 
 def test_classify_window_dilation_preserves_vrule() -> None:
@@ -81,73 +95,33 @@ def test_classify_window_no_ink_returns_zero_text() -> None:
     assert cls.text_mask.sum() == 0
 
 
-def test_expand_to_text_components_extends_left() -> None:
-    """A funsd-style answer whose bbox is shifted right of the text."""
-    img = _blank(40, 200)
-    # "Text" string spanning x=20..160
-    for x0 in (20, 45, 70, 95, 120, 145):
-        _paint_rect(img, x0, 14, x0 + 12, 28)
-    seed_bbox = (90, 12, 165, 30)  # bbox sits on the right half only
-    window = (0, 0, 200, 40)
-    cls = classify_window(img, window, seed_bbox)
+def test_classify_window_rejects_character_ascender_as_v_rule() -> None:
+    """A character vertical stroke (l, i, 1) must not register as v_rule.
 
-    out = expand_to_text_components(cls, seed_bbox)
-
-    assert out[0] <= seed_bbox[0] - 5, f"expected left extension, got {out}"
-    assert out[2] >= seed_bbox[2] - 5
-
-
-def test_expand_to_text_components_ignores_neighbour_row() -> None:
-    img = _blank(80, 120)
-    # Upper row of glyphs
-    for x0 in (10, 30, 50, 70, 90):
-        _paint_rect(img, x0, 10, x0 + 10, 25)
-    # Lower row (the targeted one)
-    for x0 in (10, 30, 50, 70, 90):
-        _paint_rect(img, x0, 50, x0 + 10, 65)
-    seed_bbox = (20, 45, 110, 70)
-    window = (0, 0, 120, 80)
-    cls = classify_window(img, window, seed_bbox)
-
-    out = expand_to_text_components(cls, seed_bbox)
-
-    assert out[1] >= 35, f"expected y0 to stay near the lower row, got {out}"
-    assert out[3] <= 75
-
-
-def test_expand_to_text_components_ignores_neighbour_column() -> None:
-    """xfund_de pattern: a question label sits in the same row as the answer
-    but in a different column. CC sweep must reject it on horizontal overlap."""
-    img = _blank(40, 240)
-    # Question column on the left (x=10..70), same y-range as the answer
-    for x0 in (10, 25, 40, 55):
-        _paint_rect(img, x0, 14, x0 + 10, 28)
-    # Answer column on the right (x=140..210)
-    for x0 in (140, 160, 180):
-        _paint_rect(img, x0, 14, x0 + 10, 28)
-
-    seed_bbox = (135, 12, 215, 30)
-    window = (0, 0, 240, 40)  # wide enough to contain both columns
-    cls = classify_window(img, window, seed_bbox)
-
-    out = expand_to_text_components(cls, seed_bbox)
-
-    assert out[0] >= 130, f"expected x0 to stay near answer column, got {out}"
-    assert out[2] <= 220
-
-
-def test_expand_to_text_components_returns_seed_when_no_text() -> None:
+    Top-hat catches thin features but v-open requires the structure to
+    be at least 0.9 * bbox_height tall. Character verticals have
+    horizontal terminators (serifs, curves) that break continuity at
+    or before that height threshold.
+    """
     img = _blank(40, 80)
-    seed_bbox = (10, 5, 70, 35)
-    cls = classify_window(img, (0, 0, 80, 40), seed_bbox)
-    assert expand_to_text_components(cls, seed_bbox) == seed_bbox
+    # An 'l'-like vertical stroke: 1 px wide, full character height
+    # with small horizontal serifs at top and bottom breaking continuity
+    _paint_rect(img, 39, 10, 40, 30)  # vertical stroke
+    _paint_rect(img, 37, 30, 42, 32)  # serif breaking continuity at the bottom
+    _paint_rect(img, 37, 8, 42, 10)   # serif at the top
+
+    bbox = (10, 5, 70, 35)  # height 30
+    cls = classify_window(img, (0, 0, 80, 40), bbox)
+
+    # The character should be classified as text, not v_rule
+    assert cls.text_mask[8:32, 35:43].any()
+    assert not cls.v_rule_mask[8:32, 39:40].any()
 
 
 def test_classification_dataclass_is_frozen() -> None:
     img = _blank(20, 20)
     cls = classify_window(img, (0, 0, 20, 20), (5, 5, 15, 15))
     assert isinstance(cls, Classification)
-    # frozen dataclass — attribute assignment must fail
     try:
         cls.window = (0, 0, 1, 1)  # type: ignore[misc]
     except (AttributeError, TypeError):

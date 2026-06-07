@@ -1,10 +1,11 @@
 """Visualisation helpers for the pixel classifier.
 
-The classifier is invisible to the eye in production — it only
-mutates ink pixels. To tune kernels and verify behaviour on real
-fixtures we overlay the per-pixel classification on the original page:
-red for text (to be erased), green for horizontal rules, blue for
-vertical dividers. Seed bbox in yellow, expanded bbox in cyan.
+The classifier is invisible to the eye in production -- it only
+mutates ink pixels inside the seed bbox. To tune kernels and verify
+behaviour on real fixtures we overlay the per-pixel classification on
+the original page: red for text (to be erased), green for horizontal
+rules, blue for vertical dividers/structure. The seed (yellow) bbox
+outline marks the actual erase region.
 
 This module never mutates the input image. Callers pass a pre-redaction
 copy of each page plus a list of ``DebugRecord`` and get a new RGB
@@ -25,7 +26,6 @@ TEXT_COLOR = (255, 0, 0)
 H_RULE_COLOR = (0, 200, 0)
 V_RULE_COLOR = (0, 80, 255)
 SEED_BBOX_COLOR = (255, 215, 0)
-EXPANDED_BBOX_COLOR = (0, 220, 220)
 
 
 def _blend(canvas: np.ndarray, color: tuple[int, int, int], mask: np.ndarray, alpha: float) -> None:
@@ -59,9 +59,7 @@ def overlay_classification(
 
     for rec in records:
         sx0, sy0, sx1, sy1 = rec.seed_bbox
-        ex0, ey0, ex1, ey1 = rec.expanded_bbox
         cv2.rectangle(canvas, (sx0, sy0), (sx1 - 1, sy1 - 1), SEED_BBOX_COLOR, 2)
-        cv2.rectangle(canvas, (ex0, ey0), (ex1 - 1, ey1 - 1), EXPANDED_BBOX_COLOR, 2)
 
     return canvas
 

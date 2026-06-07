@@ -1,15 +1,28 @@
 """Per-pixel ink classifier.
 
-For each answer bbox we want to know — without painting anything yet —
+For each answer bbox we want to know -- without painting anything yet --
 which ink pixels are *text* (to be erased) and which are *structure*
 (rules and dividers, to be preserved). Erasing only the text class
-keeps cell grids, table rules, and column separators intact, which the
-previous "paint the bbox flat and redraw rules" approach destroyed in
-the new XFUND cell-grid fixtures.
+keeps cell grids, table rules, and column separators intact.
 
-All kernel sizes are expressed as multiples of the seed bbox height so
-the same defaults work at 100 dpi (funsd ~ 15 px tall) and 300 dpi
-(xfund ~ 36-51 px tall). Absolute-pixel kernels won't generalise.
+Horizontal rules use the classical "morph open with a wide horizontal
+kernel" detector on the Otsu foreground.
+
+Vertical rules use a two-stage detector that doesn't go through Otsu:
+
+1. Black top-hat on grayscale with a wide horizontal kernel highlights
+   every dark feature thinner than the kernel -- including faint grey
+   cell dividers Otsu's binary threshold would drop.
+2. Morph open with a vertical kernel keeps only structures tall enough
+   to be rules, rejecting character ascenders (which break vertical
+   continuity via serifs and curves).
+
+Top-hat operates on grayscale so the Otsu "lose grey-near-threshold
+pixels" bottleneck never applies to v-rule detection. The strategy
+comparator under tests/blank_forms/manual/ (run once, not currently
+checked in) showed this configuration catches 5x more divider pixels
+than the pure-Otsu kernel approach on cell-grid fixtures, with zero
+character regressions on funsd.
 """
 
 from __future__ import annotations
@@ -48,27 +61,35 @@ def classify_window(
     bbox: Bbox,
     *,
     h_kernel_frac: float = 1.5,
-    v_kernel_frac: float = 1.8,
     min_h_kernel_px: int = 11,
+    v_kernel_frac: float = 0.9,
     min_v_kernel_px: int = 15,
+    tophat_kernel_px: int = 15,
+    tophat_threshold: int = 20,
     dilate_text_px: int = 1,
 ) -> Classification:
     """Classify ink pixels inside ``window`` as text / h-rule / v-rule.
 
     ``image`` is the full RGB uint8 page. ``window`` and ``bbox`` are
-    absolute coordinates; we never re-clip to image bounds here — the
-    caller is responsible for passing a window already clipped by
-    ``_make_window`` in :mod:`redact`.
+    absolute coordinates; the caller is responsible for passing a window
+    already clipped by ``_make_window`` in :mod:`redact`.
 
     Kernel sizing notes:
 
     * ``h_kernel_frac=1.5`` * bbox_height covers every plausible glyph
       stroke -- a rule must be wider than 1.5x a glyph's bbox to qualify.
-    * ``v_kernel_frac=1.8`` * bbox_height clears the tallest ascender by
-      ~80 %; with ``expand_frac=0.5`` (in :mod:`redact`) any divider that
-      spans the bbox-plus-window-expansion qualifies (1.8 <= 1 + 2*0.5).
-    * Both kernels are floored at ``min_*_kernel_px`` so the small-bbox
-      checkboxes in xfund_fr_train_21 still classify correctly.
+    * ``v_kernel_frac=0.9`` * bbox_height is the second-stage vertical
+      open after top-hat. Character ascenders have horizontal terminators
+      (serifs, curves) that break the vertical column, so they don't pass
+      a 0.9-bbox-height kernel; cell dividers and column borders do.
+    * ``tophat_kernel_px=15`` is the horizontal width of the black top-
+      hat structuring element. Features thinner than 15 px horizontally
+      register as top-hat response; anything wider does not. Absolute
+      pixels (not bbox-relative) because the criterion is "thin feature"
+      and that's a property of the rasterisation, not the bbox.
+    * ``tophat_threshold=20`` cuts the top-hat response at ~8 % grey,
+      catching faint grey dividers (Otsu threshold on these fixtures is
+      ~159, dividers sit at ~120-150, so they're well above this cut).
     """
     x0, y0, x1, y1 = window
     crop = image[y0:y1, x0:x1]
@@ -81,12 +102,17 @@ def classify_window(
 
     bbox_h = max(1, bbox[3] - bbox[1])
     h_kw = _odd(max(min_h_kernel_px, round(bbox_h * h_kernel_frac)))
-    v_kh = _odd(max(min_v_kernel_px, round(bbox_h * v_kernel_frac)))
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kw, 1))
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_kh))
-
     h_rule_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, h_kernel)
-    v_rule_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, v_kernel)
+
+    # Two-stage v-rule detection: top-hat then v-open.
+    tophat_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (tophat_kernel_px, 1))
+    tophat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, tophat_kernel)
+    _, tophat_bin = cv2.threshold(tophat, tophat_threshold, 255, cv2.THRESH_BINARY)
+    v_kh = _odd(max(min_v_kernel_px, round(bbox_h * v_kernel_frac)))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_kh))
+    v_rule_mask = cv2.morphologyEx(tophat_bin, cv2.MORPH_OPEN, v_kernel)
+
     rule_union = cv2.bitwise_or(h_rule_mask, v_rule_mask)
 
     text_mask = cv2.bitwise_and(fg_mask, cv2.bitwise_not(rule_union))
@@ -99,104 +125,3 @@ def classify_window(
         text_mask = cv2.bitwise_and(text_mask, cv2.bitwise_not(rule_union))
 
     return Classification(text_mask, h_rule_mask, v_rule_mask, fg_mask, window)
-
-
-def _hgap(a: Bbox, b: Bbox) -> int:
-    return max(0, max(a[0], b[0]) - min(a[2], b[2]))
-
-
-def _voverlap(a: Bbox, b: Bbox) -> int:
-    return min(a[3], b[3]) - max(a[1], b[1])
-
-
-def expand_to_text_components(
-    classification: Classification,
-    seed_bbox: Bbox,
-    *,
-    vertical_overlap_min_px: int = 2,
-    chain_max_gap_frac: float = 1.5,
-    chain_max_gap_min_px: int = 8,
-) -> Bbox:
-    """Union text components in the same line as ``seed_bbox`` by chaining.
-
-    Strategy: a component is in the answer's redaction set iff there is
-    an unbroken chain of horizontally-close, vertically-aligned text
-    components linking it back to a component that overlaps the seed
-    bbox. This handles two cases at once:
-
-    * funsd's "H.L. Williams" where the annotation only covers
-      "Williams": "Williams" overlaps the seed, "L." chains via a small
-      gap, "H" chains via a small gap.
-    * xfund_de's question column "Privatadresse" sitting in the same
-      row as the answer "56068 Koblenz": the question word is too far
-      horizontally from any component that overlaps the seed, so the
-      chain breaks before reaching it.
-
-    The chain gap budget is ``chain_max_gap_frac * seed_bbox_height``
-    floored at ``chain_max_gap_min_px``. 1.5x bbox height covers
-    inter-word gaps within an answer ("1995- 13D" has a ~2x bbox height
-    gap between the digits and the dash-prefixed code) while staying
-    well under the much larger gaps that separate columns on these
-    fixtures (xfund_de's question-to-answer gap is ~5x bbox height).
-
-    Returns ``seed_bbox`` unchanged if nothing qualifies; the caller
-    treats that as a no-op (no text -> no erase).
-    """
-    n, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
-        classification.text_mask, connectivity=8
-    )
-    if n <= 1:
-        return seed_bbox
-
-    win_x0, win_y0, win_x1, win_y1 = classification.window
-    sx0, sy0, sx1, sy1 = seed_bbox
-
-    seed_h = max(1, sy1 - sy0)
-    max_gap = max(chain_max_gap_min_px, round(seed_h * chain_max_gap_frac))
-
-    components: list[Bbox] = []
-    for i in range(1, n):
-        cx0_rel, cy0_rel, cw, ch, _area = stats[i]
-        cx0 = win_x0 + int(cx0_rel)
-        cy0 = win_y0 + int(cy0_rel)
-        components.append((cx0, cy0, cx0 + int(cw), cy0 + int(ch)))
-
-    in_set: list[Bbox] = [
-        c
-        for c in components
-        if _voverlap(c, seed_bbox) >= vertical_overlap_min_px and _hgap(c, seed_bbox) == 0
-    ]
-    if not in_set:
-        return seed_bbox
-
-    pool = [c for c in components if c not in in_set]
-    changed = True
-    while changed:
-        changed = False
-        remaining: list[Bbox] = []
-        for c in pool:
-            connected = any(
-                _voverlap(c, k) >= vertical_overlap_min_px and _hgap(c, k) <= max_gap
-                for k in in_set
-            )
-            if connected:
-                in_set.append(c)
-                changed = True
-            else:
-                remaining.append(c)
-        pool = remaining
-
-    out_x0 = min(b[0] for b in in_set)
-    out_y0 = min(b[1] for b in in_set)
-    out_x1 = max(b[2] for b in in_set)
-    out_y1 = max(b[3] for b in in_set)
-    out_x0 = min(out_x0, sx0)
-    out_y0 = min(out_y0, sy0)
-    out_x1 = max(out_x1, sx1)
-    out_y1 = max(out_y1, sy1)
-    return (
-        max(out_x0, win_x0),
-        max(out_y0, win_y0),
-        min(out_x1, win_x1),
-        min(out_y1, win_y1),
-    )

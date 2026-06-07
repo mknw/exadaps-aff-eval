@@ -97,16 +97,11 @@ def test_generate_blank_produces_image_pdf(
 
     assert result["source"] == source
     assert result["pages"] >= 1
-    assert {"field_id", "page", "bbox_px", "expanded_bbox", "text_components",
+    assert {"field_id", "page", "bbox_px", "text_components",
             "bg_color", "strategy"} <= set(result["fields"][0])
     for fld in result["fields"]:
         assert fld["strategy"] in {"fill", "noop_no_text"}
         assert len(fld["bg_color"]) == 3
-        ex0, ey0, ex1, ey1 = fld["expanded_bbox"]
-        sx0, sy0, sx1, sy1 = fld["bbox_px"]
-        # expanded must contain seed
-        assert ex0 <= sx0 and ey0 <= sy0
-        assert ex1 >= sx1 and ey1 >= sy1
 
     labels = json.loads(Path(result["labels"]).read_text())
     assert len(labels) == expected_answers
@@ -115,20 +110,17 @@ def test_generate_blank_produces_image_pdf(
     assert _pdf_text(blank_pdf) == ""
 
 
-def _diff_outside_expanded(
+def _diff_outside_bboxes(
     source_rgb: np.ndarray,
     blank_rgb: np.ndarray,
-    expanded_bboxes: list[tuple[int, int, int, int]],
+    bboxes: list[tuple[int, int, int, int]],
 ) -> float:
-    """Mean per-pixel L1 outside the union of expanded bboxes (range 0..1)."""
+    """Mean per-pixel L1 outside the union of seed bboxes (range 0..1)."""
     h, w = blank_rgb.shape[:2]
     if source_rgb.shape != blank_rgb.shape:
-        # Different render scales -- the PNG fixtures and the pymupdf-rendered
-        # blank go through the same dpi pipeline, so any size mismatch means
-        # the runner produced something we shouldn't compare.
         return 1.0
     mask = np.ones((h, w), dtype=bool)
-    for x0, y0, x1, y1 in expanded_bboxes:
+    for x0, y0, x1, y1 in bboxes:
         mask[y0:y1, x0:x1] = False
     diff = np.abs(source_rgb.astype(np.int16) - blank_rgb.astype(np.int16)).mean(axis=-1)
     return float(diff[mask].mean()) / 255.0
@@ -138,12 +130,12 @@ def _diff_outside_expanded(
     "fixture_stem,extension",
     [(t[1], t[2]) for t in IMAGE_FIXTURES if t[2] == ".png"],
 )
-def test_pixels_outside_expanded_bbox_match_source(
+def test_pixels_outside_seed_bbox_match_source(
     tmp_path: Path,
     fixture_stem: str,
     extension: str,
 ) -> None:
-    """No accidental writes outside the bboxes we said we redacted."""
+    """No writes outside the seed bbox (strict-yellow scope)."""
     input_path = GOLDEN / f"{fixture_stem}{extension}"
     field_path = GOLDEN / f"{fixture_stem}.fields.json"
 
@@ -153,8 +145,8 @@ def test_pixels_outside_expanded_bbox_match_source(
     source = _render_source_at(input_path, dpi=150)
     blank = _render_blank_first_page(blank_pdf, dpi=150)
 
-    p0_bboxes = [tuple(f["expanded_bbox"]) for f in result["fields"] if f["page"] == 0]
-    mean_l1 = _diff_outside_expanded(source, blank, p0_bboxes)
+    p0_bboxes = [tuple(f["bbox_px"]) for f in result["fields"] if f["page"] == 0]
+    mean_l1 = _diff_outside_bboxes(source, blank, p0_bboxes)
     # 1 px in 255 worth of mean noise is the budget -- the PDF re-encode is
     # JPEG-ish lossy at low quality, so 0 is unrealistic.
     assert mean_l1 < 5e-3, f"outside-bbox mean L1 = {mean_l1}"
