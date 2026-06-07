@@ -21,17 +21,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          enable-cache: true
 
-      - name: Install linting tools
-        run: pip install ruff pylint
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install project + dev deps
+        run: uv sync --frozen
 
       - name: Lint with ruff
-        run: python -m ruff check src/aff/ tests/
+        run: uv run ruff check src/aff/ tests/
 
       - name: Lint with pylint (errors only)
-        run: python -m pylint --disable=all --enable=E src/aff/
+        run: uv run pylint --disable=all --enable=E src/aff/

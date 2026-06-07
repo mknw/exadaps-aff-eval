@@ -7,6 +7,9 @@ data/*
 # Pipeline runtime state
 pipeline_state.json
 
+# Generated blank-form outputs (one dir per approach run)
+out/
+
 # HuggingFace cache
 .hf_cache/
 data/raw/.hf_cache/
