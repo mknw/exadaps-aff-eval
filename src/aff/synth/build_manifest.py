@@ -29,6 +29,7 @@ import structlog
 from aff.ingest.vrdu import parse_subset
 from aff.schema import DocumentRecord
 from aff.synth.classify import PdfClassification, classify_pdf
+from aff.synth.document_kind import detect_fara_subtype
 from aff.synth.sample import select_sample, sources_breakdown, write_sample_metadata
 
 log = structlog.get_logger()
@@ -113,6 +114,7 @@ def _manifest_entry(candidate: _Candidate) -> dict:
         "category": cls.category,
         "source": record.source,
         "doc_id": record.doc_id,
+        "subtype": detect_fara_subtype(record.doc_id),
         "pdf": record.pdf_path,  # absolute; resolves under any --golden-set
         "image": None,
         "fields_json": f"{subset_subdir}/{record.doc_id}.fields.json",
@@ -129,6 +131,8 @@ def _write_outputs(
     classified_counts: dict[str, int],
     selected_sources: list[str],
     sampled_from_total: int | None = None,
+    include_subtypes: list[str] | None = None,
+    subtype_dropped: int | None = None,
 ) -> Path:
     """Write per-doc fields.json + manifest.json for the given candidates."""
     documents: list[dict] = []
@@ -146,6 +150,9 @@ def _write_outputs(
     }
     if sampled_from_total is not None:
         build_stats["sampled_from_total"] = sampled_from_total
+    if include_subtypes is not None:
+        build_stats["include_subtypes"] = include_subtypes
+        build_stats["subtype_dropped"] = subtype_dropped or 0
 
     manifest = {
         "version": MANIFEST_VERSION,
@@ -173,6 +180,7 @@ def build_manifest(
     sample_size: int | None = None,
     seed: int = 0,
     exclude: set[str] | None = None,
+    include_subtypes: set[str] | None = None,
 ) -> Path:
     """Classify VRDU, filter to processable categories, optionally sample, write.
 
@@ -182,6 +190,10 @@ def build_manifest(
     When ``sample_size`` is given, the manifest is restricted to a
     deterministic stratified sample of that size and ``sample_v1.json``
     is written next to ``manifest.json`` recording the selection.
+
+    When ``include_subtypes`` is given, candidates are restricted to docs
+    whose FARA filename subtype (e.g. ``"Short-Form"``) is in the set.
+    Docs without a recognised subtype are dropped under this filter.
     """
     data_root = Path(data_root).resolve()
     out_root = Path(out_root)
@@ -189,6 +201,15 @@ def build_manifest(
 
     selected_sources = sources if sources is not None else list(SUBSETS)
     candidates, classified_counts = _collect_candidates(data_root, selected_sources)
+
+    subtype_dropped = 0
+    if include_subtypes is not None:
+        before = len(candidates)
+        candidates = [
+            c for c in candidates
+            if detect_fara_subtype(c.record.doc_id) in include_subtypes
+        ]
+        subtype_dropped = before - len(candidates)
 
     sampled_from_total: int | None = None
     if sample_size is not None:
@@ -215,6 +236,8 @@ def build_manifest(
         classified_counts,
         selected_sources,
         sampled_from_total=sampled_from_total,
+        include_subtypes=sorted(include_subtypes) if include_subtypes else None,
+        subtype_dropped=subtype_dropped if include_subtypes is not None else None,
     )
     log.info(
         "synth.build_manifest.complete",
@@ -285,6 +308,17 @@ def _parse_exclude(value: str | None) -> set[str]:
         "or a path to a newline-delimited file."
     ),
 )
+@click.option(
+    "--include-subtypes",
+    "include_subtypes",
+    type=str,
+    default=None,
+    help=(
+        "Comma-separated FARA filename subtypes to keep "
+        "(e.g. 'Short-Form' or 'Short-Form,Amendment'). Drops docs without "
+        "a recognised subtype tag."
+    ),
+)
 def main(
     data_root: Path,
     out_root: Path,
@@ -292,9 +326,13 @@ def main(
     sample_size: int | None,
     seed: int,
     exclude: str | None,
+    include_subtypes: str | None,
 ) -> None:
     src_list = [s.strip() for s in sources.split(",")] if sources else None
     exclude_set = _parse_exclude(exclude)
+    subtype_set: set[str] | None = None
+    if include_subtypes:
+        subtype_set = {s.strip() for s in include_subtypes.split(",") if s.strip()}
     path = build_manifest(
         data_root,
         out_root,
@@ -302,6 +340,7 @@ def main(
         sample_size=sample_size,
         seed=seed,
         exclude=exclude_set,
+        include_subtypes=subtype_set,
     )
     click.echo(f"wrote {path}")
 
