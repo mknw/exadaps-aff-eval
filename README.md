@@ -1,182 +1,147 @@
-# PDF-Generation-for-HPE_AFF
+# exadaps-aff-eval
 
-A standalone five-stage data engineering pipeline that ingests four public form-understanding datasets, consolidates them into a unified structured dataset, generates synthetic variants at scale using Genalog, and ships a reusable loader API for downstream projects — primarily HPE-AFF.
+Synthetic dataset for **automated form-filling evaluation**. Generates
+*blank* versions of filled PDFs, paired with ground-truth labels
+(`field_id`, `bbox`, `expected_value`) — the inputs and oracles a
+form-filler can be scored against.
 
-**Zero API calls. No Azure. No LLM. No internet at runtime.** All datasets download once in Stage 1 and are local thereafter.
+The removal must be **non-detectable** in the output PDF: no rectangular
+overlays, no half-redacted operators, no rasterisation of content that
+was vector-rendered. The goal is form-filling evaluation, not document
+understanding — only actual forms qualify (letters, memos, invoices,
+reports do not).
 
 ---
 
-## Pipeline overview
+## Approach lanes
 
-| Stage | Name | What it does |
-|---|---|---|
-| 1 | **INGEST** | Download and normalise 4 datasets to unified schema |
-| 2 | **ORDER** | Deduplicate, quality-score, assign train/val/test splits |
-| 3 | **CONSOLIDATE** | Write Parquet master table + JSON field index |
-| 4 | **GENERATE** | Genalog degradation variants + form_harness.py synthetic PDFs |
-| 5 | **TEST** | pytest suite validating every stage output |
+Five blank-form strategies are explored in parallel. The first has been
+merged; the rest are scaffolded in sibling worktrees and live on
+`approach/*` branches.
 
-Pipeline runs dependent stages in one process so records move through ingest, order, consolidate, and generate in memory. `pipeline_state.json` is a run-status log only; it is not used to reload stage records after restart.
+| Lane | Status | Categories handled | Notes |
+| --- | --- | --- | --- |
+| **pymupdf-redact** | merged on `main` | `born_digital_pdf`, `synthetic_acroform` | First shipped. See `docs/approaches/pymupdf-redact.md`. |
+| content-stream-surgery | in worktree | `born_digital_pdf`, `synthetic_acroform` | Direct content-stream operator removal. |
+| overlay-mask | in worktree | `born_digital_pdf`, `synthetic_acroform` | Overlay background-coloured rects + glyph repaint. |
+| page-rebuild | in worktree | `born_digital_pdf`, `synthetic_acroform` | Extract every element, redraw page, omit answer spans. |
+| image-fallback | in worktree | all four (universal) | High-DPI raster + classical CV removal + image-PDF re-encode. |
 
-See [`AGENTS.md`](AGENTS.md) for the full technical specification.
+---
+
+## Categories
+
+Each source document is labelled by structural flavour:
+
+- `synthetic_acroform` — AcroForm widgets with `/V` / `/AP` carrying the answer
+- `born_digital_pdf` — answers in content-stream text show-operators
+- `image_only_pdf` — single image XObject covering the page (scan-only)
+- `image_only_png` — raster-only source (FUNSD / XFUND)
+
+Only the first two are pymupdf-redact targets. Image-only sources fall
+through to image-fallback.
 
 ---
 
 ## Repository layout
 
 ```
-.
-├── AGENTS.md                      ← full technical specification
-├── CLAUDE.md                      ← Claude Code session entrypoint
-├── requirements.txt               ← pinned dependencies
-├── pyproject.toml                 ← pytest + ruff config
-├── .env.example                   ← environment variable reference
-├── pipeline_state.json            ← run status log (written by pipeline)
-├── form_harness.py                ← existing synthetic PDF generator
-│
-├── data_pipeline/                 ← all source code
-│   ├── __init__.py
-│   ├── ingest/
-│   │   ├── funsd.py               ← Stage 1.1
-│   │   ├── xfund.py               ← Stage 1.2
-│   │   ├── vrdu.py                ← Stage 1.3
-│   │   └── rvlcdip.py             ← Stage 1.4
-│   ├── order.py                   ← Stage 2
-│   ├── consolidate.py             ← Stage 3
-│   ├── generate/
-│   │   ├── degradation.py         ← Stage 4.1 — Genalog wrapper
-│   │   └── synthetic.py           ← Stage 4.2 — form_harness.py integration
-│   ├── storage.py                 ← Parquet + JSON read/write helpers
-│   ├── loader.py                  ← public API for HPE-AFF and other consumers
-│   ├── cli.py                     ← CLI entry point
-│   └── tests/
-│       ├── conftest.py            ← shared fixtures
-│       └── test_pipeline.py       ← full test suite (Stage 5)
-│
-├── data/                          ← gitignored except data/test_forms/
-│   ├── raw/                       ← downloaded originals, never modified
-│   ├── test_forms/                ← 10 HPE-AFF test PDFs — committed fixtures
-│   ├── consolidated/
-│   │   ├── master.parquet
-│   │   ├── manifest.json
-│   │   └── fields/                ← one JSON per document
-│   └── generated/
-│       ├── degraded/              ← Genalog variants
-│       └── synthetic_pdfs/        ← form_harness.py output
-│
-└── .github/
-    ├── workflows/ci.yml           ← GitHub Actions CI
-    └── CLAUDE_WORKFLOW.md         ← branching, commit, PR rules
+src/aff/
+├── schema.py              DocumentRecord / FieldRecord dataclasses
+├── ingest/                raw datasets → normalised records
+│   ├── funsd.py
+│   ├── xfund.py
+│   ├── vrdu.py
+│   └── rvlcdip.py
+├── blank_forms/           records → blanked PDFs
+│   ├── pymupdf_redact.py    content-stream + widget redaction
+│   ├── acroform_clear.py    pypdf widget purge
+│   └── __main__.py          CLI dispatcher (reads manifest.json by category)
+└── synth/                 (in flight) dataset build + sample + analyze
+
+tests/
+├── blank_forms/           pymupdf-redact regression tests
+└── fixtures/golden_set/   8 curated documents + manifest.json + fields.json
+
+docs/approaches/           one document per blank-form approach
+legacy/                    archived pre-rewrite code; reference only
+data/                      all data; gitignored except data/test_forms/
 ```
 
 ---
 
-## Datasets
+## Current state
 
-| Source | Records | Quality tier | Has PDF | Role |
-|---|---|---|---|---|
-| FUNSD (revised) | 199 | degraded | No | Field extraction, HPE-AFF eval |
-| XFUND DE + FR | 199 each | degraded | No | Multilingual field extraction |
-| VRDU registration | 1,915 | clean | Yes | HPE-AFF fill evaluation |
-| VRDU ad_buy | 641 | clean | Yes | HPE-AFF fill evaluation |
-| RVL-CDIP invoice | varies | degraded | No | Classifier training only |
-
-VRDU is the only dataset with real PDFs. RVL-CDIP records are blocked from fill evaluation by assertion in `loader.py`.
+- **`pymupdf-redact`** is merged. Verified end-to-end on the 2 compatible
+  golden-set docs (`synthetic_supplier.pdf`, `vrdu_born_digital.pdf`).
+- **Active sprint**: validate `pymupdf-redact` on a 200-doc random sample
+  from VRDU (641 ad-buy + 1915 registration-form PDFs). New `src/aff/synth/`
+  package handles classification, sampling, run orchestration, recolor-glyph
+  QA previews, and post-run failure analysis. Plan at
+  `/Users/mknw/.claude/plans/greedy-wiggling-pretzel.md`.
+- **Next milestone — v1 dataset**: once `pymupdf-redact` is finetuned, run
+  against **all** categorised `born_digital_pdf` + `synthetic_acroform`
+  forms across the source corpora.
 
 ---
 
 ## Quick start
 
-### Prerequisites
-
 ```bash
-# Ubuntu/Debian — system dependencies required by Genalog
-sudo apt-get install -y \
-  libpango-1.0-0 libpangoft2-1.0-0 \
-  libgdk-pixbuf2.0-0 libcairo2 libffi-dev
-```
+# Toolchain — nix + uv + python 3.14 via flake.nix
+nix develop
 
-### Install
+# Install dependencies
+uv sync
 
-```bash
-pip install -r requirements.txt
-```
+# Run the existing pymupdf-redact pipeline against the golden set
+uv run python -m aff.blank_forms \
+    --golden-set tests/fixtures/golden_set/ \
+    --out-dir out/golden_set/
 
-### Configure
+# Open the outputs
+open out/golden_set/synthetic_supplier/blank.pdf
+open out/golden_set/vrdu_born_digital/blank.pdf
 
-```bash
-cp .env.example .env
-# edit DATA_ROOT if needed — default is ./data
-```
-
-### Run
-
-```bash
-# Run all stages
-python -m data_pipeline.cli run --all --seed 42
-
-# Standalone stages
-python -m data_pipeline.cli run --stage ingest
-python -m data_pipeline.cli run --stage test
-
-# order/consolidate/generate require in-memory records from the same process:
-# use run --all for those stages
-
-# Check which stages are complete
-python -m data_pipeline.cli status
-
-# Print manifest summary
-python -m data_pipeline.cli report
-
-# Export a split for use in another project
-python -m data_pipeline.cli export --split val --output ./export/
+# Tests
+uv run pytest
 ```
 
 ---
 
-## Loader API
+## Output contract per document
 
-```python
-from data_pipeline import loader
+The blank-form generator writes per processed document:
 
-# Get val-split records with PDF + ground truth — ready for HPE-AFF fill evaluation
-records = loader.load_for_hpe_aff(split="val", require_pdf=True, require_gt=True)
-
-# Sample reproducibly
-sample = loader.sample(n=50, split="val", seed=42)
-
-# Filter by source
-vrdu = loader.filter(source="vrdu_ad_buy", split="test")
-
-# Dataset statistics
-print(loader.stats())
+```
+out/<run-name>/<doc_id>/
+├── blank.pdf       redacted PDF
+└── labels.json     {doc_id, source, page_count, answer_fields: [...]}
 ```
 
----
+And one `manifest.jsonl` per run, with one line per document carrying
+status, field counts, and skip reasons.
 
-## Environment variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `DATA_ROOT` | `./data` | Root directory for all data |
-| `PIPELINE_SEED` | `42` | Seed for all random operations |
-| `PIPELINE_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` |
-| `HF_DATASETS_OFFLINE` | _(unset)_ | Set to `1` in CI to skip downloads |
+See `tests/fixtures/golden_set/README.md` for the per-document data
+contract and field-JSON schema.
 
 ---
 
-### Testing
+## Workflow
 
-```bash
-# CI-safe subset (no downloads needed)
-pytest data_pipeline/tests/ -v --tb=short
-
-# Full suite (requires downloaded data)
-HF_DATASETS_OFFLINE=0 pytest data_pipeline/tests/ -v
-```
-
-### CI
-
-GitHub Actions runs on `data-pipeline/**` branches and PRs to `main`. `HF_DATASETS_OFFLINE=1` skips download-dependent tests automatically.
+- Branch from `main`. Never commit to `main` directly.
+- Approach lanes use worktrees on `approach/<name>` branches under
+  `~/Code/exadaps-aff-ds-synth-worktrees/`. They commit but do not push or
+  open PRs; merges land here.
+- See `.github/CLAUDE_WORKFLOW.md` for the full workflow rules.
 
 ---
+
+## Documentation
+
+- `CLAUDE.md` — Claude Code session entrypoint (read first).
+- `AGENTS.md` — technical specification.
+- `docs/approaches/<name>.md` — one document per blank-form approach.
+- `tests/fixtures/golden_set/README.md` — the curated evaluation slice.
+- `tests/fixtures/golden_set/CANDIDATES.md` — curation log: what got in, what didn't, why.
+- `legacy/README.md` — what was archived and why.

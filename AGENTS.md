@@ -1,575 +1,239 @@
-# AGENTS.md — HPE-AFF Data Engineering Pipeline
-## Standalone data project — no Azure, no LLM calls, no HPE-AFF filling system
+# AGENTS.md — Technical specification
 
-**Read this file completely before writing a single line of code.**
-This is the technical specification. The GitHub workflow instructions are in `.github/CLAUDE_WORKFLOW.md`.
+**Project: blank-form generation for automated form-filling evaluation.**
 
----
+Read this completely before making architectural changes. Pair it with
+`docs/approaches/<name>.md` for per-approach implementation detail.
 
-## 0. What this project is
-
-A standalone five-stage data engineering pipeline that ingests four public
-form-understanding datasets, consolidates them into a unified structured
-dataset, generates synthetic variants at scale using Genalog, and ships a
-reusable loader API for downstream projects — primarily HPE-AFF.
-
-**This project makes zero API calls. No Azure. No LLM. No internet at runtime.**
-Genalog uses classical OpenCV/Pillow image processing only. All datasets
-download from HuggingFace Hub or GitHub during Stage 1 and are then local.
+The 5-stage Genalog-based data pipeline this file previously described
+was archived under `legacy/data_pipeline/` and is no longer maintained.
 
 ---
 
-## 1. Pipeline overview
+## 1. What we build
 
-```
-Stage 1: INGEST      — download + normalise 4 datasets to unified schema
-Stage 2: ORDER       — deduplicate, quality-score, assign train/val/test splits
-Stage 3: CONSOLIDATE — write Parquet master table + JSON field index
-Stage 4: GENERATE    — Genalog degradation variants + form_harness.py synthetic PDFs
-Stage 5: TEST        — pytest suite validating every stage output
-```
+Given a *filled* form (PDF or rasterised image) and its annotated answer
+fields, produce a **blank** form whose answer regions have been removed
+**non-detectably**, along with ground-truth labels suitable for scoring
+a downstream form-filler.
 
-Pipeline keeps records in memory across dependent stages during `run --all`.
-`pipeline_state.json` is a run-status log only; it does not reload records
-after process restart.
+Non-goals:
+- General document understanding. Only actual forms qualify.
+- LLM calls at runtime. No Azure, no API.
+- Pre-built training corpora for OCR / DI models.
 
 ---
 
-## 2. Repository layout
+## 2. Categories
 
-```
-.                                  ← repo root
-├── AGENTS.md                      ← this file
-├── CLAUDE.md                      ← Claude Code session entrypoint
-├── requirements.txt               ← pinned dependencies
-├── pyproject.toml                 ← pytest + ruff config
-├── .env.example                   ← no secrets, just DATA_ROOT + seed
-├── pipeline_state.json            ← written by pipeline, tracks run status
-├── form_harness.py                ← existing synthetic PDF generator (do not rewrite)
-│
-├── data_pipeline/                 ← all source code
-│   ├── __init__.py
-│   ├── ingest/
-│   │   ├── __init__.py
-│   │   ├── funsd.py               ← Stage 1.1
-│   │   ├── xfund.py               ← Stage 1.2
-│   │   ├── vrdu.py                ← Stage 1.3
-│   │   └── rvlcdip.py             ← Stage 1.4
-│   ├── order.py                   ← Stage 2
-│   ├── consolidate.py             ← Stage 3
-│   ├── generate/
-│   │   ├── __init__.py
-│   │   ├── degradation.py         ← Stage 4.1 — Genalog wrapper
-│   │   └── synthetic.py           ← Stage 4.2 — form_harness.py integration
-│   ├── storage.py                 ← Parquet + JSON read/write helpers
-│   ├── loader.py                  ← public API for HPE-AFF and other consumers
-│   ├── cli.py                     ← CLI entry point
-│   └── tests/
-│       ├── __init__.py
-│       ├── conftest.py            ← shared fixtures
-│       └── test_pipeline.py       ← full test suite (Stage 5)
-│
-├── data/                          ← gitignored except data/test_forms/
-│   ├── raw/                       ← downloaded originals, never modified
-│   │   ├── funsd/
-│   │   ├── xfund/
-│   │   └── vrdu/
-│   ├── test_forms/                ← 10 HPE-AFF test PDFs — committed, these are fixtures
-│   ├── consolidated/
-│   │   ├── master.parquet
-│   │   ├── manifest.json
-│   │   └── fields/                ← one JSON per document
-│   └── generated/
-│       ├── degraded/              ← Genalog variants
-│       └── synthetic_pdfs/        ← form_harness.py output
-│
-└── .github/
-    ├── workflows/
-    │   └── ci.yml                 ← GitHub Actions CI
-    └── CLAUDE_WORKFLOW.md         ← branching, commit, PR rules
-```
+Each input is classified by structural flavour. The category determines
+which blank-form approaches can process it.
+
+| Category | Definition | Detection |
+| --- | --- | --- |
+| `synthetic_acroform` | AcroForm widgets carry the answer (`/V`, `/AP`, `/MK BG`) | `page.first_widget` present, no content-stream text |
+| `born_digital_pdf` | Answers in content-stream text show-operators (Tj / TJ) | `page.get_text("text").strip()` non-empty |
+| `image_only_pdf` | Single image XObject covering the page; no extractable text | both above false |
+| `image_only_png` | Raster-only source (FUNSD / XFUND) | source format |
+
+Ordering matters when both signals fire: `born_digital_pdf` wins over
+`synthetic_acroform` (VRDU born-digital PDFs commonly carry widget
+scaffolding that does not hold the answer).
 
 ---
 
-## 3. Unified document schema
+## 3. Schema — source of truth
 
-Every ingester in Stage 1 must produce records conforming to this schema.
-Do not deviate. This is what Stage 2 and all downstream stages consume.
+Dataclasses live in `src/aff/schema.py`. Two records:
 
-```python
-@dataclass
-class DocumentRecord:
-    # Identity
-    source:       str    # "funsd" | "xfund_de" | "xfund_fr" |
-                         # "vrdu_registration" | "vrdu_ad_buy" | "rvlcdip_invoice"
-    doc_id:       str    # unique within source
+- **`DocumentRecord`** — one source document plus its annotated fields.
+  Carries `source`, `doc_id`, optional `image_path` / `pdf_path`,
+  `page_count`, `language`, `doc_class`, `quality_tier`, `quality_score`,
+  optional `split`, and a `list[FieldRecord]`. Derived `gt_payload` (dict)
+  exposed via `@property`.
+- **`FieldRecord`** — one annotated field. Carries `field_id`, `label`,
+  `value`, `role` (`question` / `answer` / `header` / `other`),
+  `bbox_norm` (`[x0, y0, x1, y1]` normalised to `[0, 1]`), `page` (0-indexed),
+  `source_fmt` (`image` / `pdf`), optional `match_type` (from VRDU `meta.json`).
+  Derived `has_response` exposed via `@property`.
 
-    # File paths (relative to DATA_ROOT)
-    image_path:   str    # path to PNG/TIFF image
-    pdf_path:     str | None  # path to PDF — only VRDU has this
-
-    # Document metadata
-    page_count:   int
-    language:     str    # "en" | "de" | "fr"
-    doc_class:    str    # "form" | "invoice" | "receipt" | "compliance" etc.
-
-    # Fields — the core annotation
-    fields: list[FieldRecord]
-
-    # Ground truth payload — {field_id: value} — directly usable by HPE-AFF
-    # Empty dict for RVL-CDIP (no field annotations)
-    gt_payload: dict[str, str]
-
-    # Quality
-    quality_tier:  str   # "clean" | "degraded" | "clean_synthetic" | "degraded_synthetic"
-    quality_score: float # 0.0–1.0, computed in Stage 2
-
-    # Split — assigned in Stage 2
-    split: str | None    # "train" | "val" | "test" | None (before Stage 2)
-
-
-@dataclass
-class FieldRecord:
-    field_id:     str
-    label:        str        # human-readable field name / question text
-    value:        str        # the response / answer text
-    role:         str        # "question" | "answer" | "header" | "other"
-    bbox_norm:    list[float]  # [x0, y0, x1, y1] normalised 0–1
-    page:         int        # 0-indexed
-    source_fmt:   str        # "image" | "pdf"
-    has_response: bool       # True if role=="answer" and value non-empty
-    match_type:   str | None # "DateMatch"|"NumericalMatch"|"PriceMatch"|"StringMatch"|None
-                             # Only VRDU has this; None for all others
-```
+Serialisation: `DocumentRecord.to_dict()` / `from_dict()` round-trip JSON.
+PEP 695 `type` aliases for `Bbox`, `Role`, `SourceFmt`, `QualityTier`, `Split`.
 
 ---
 
-## 4. Stage 1 — INGEST
+## 4. Source corpora
 
-### 4.1 FUNSD (revised version)
-
-```python
-from datasets import load_dataset
-ds = load_dataset("florianbussmann/FUNSD-vu2020revising")
+```
+data/raw/
+├── funsd/        199 scanned forms (PNG only)              — image_only_png
+├── xfund/        199 PNG per language (de, fr currently)   — image_only_png
+├── rvlcdip/      large image set                           — set aside, mostly non-forms
+└── vrdu/
+    ├── ad-buy-form/main/pdfs/         641 PDFs    + dataset.jsonl.gz + meta.json
+    └── registration-form/main/pdfs/  1915 PDFs    + dataset.jsonl.gz + meta.json
 ```
 
-- 199 scanned form images (PNG) + per-form JSON
-- Annotations: entity id, label (question/answer/header/other),
-  bounding box in absolute pixel coords `[x0, y0, x1, y1]`,
-  entity linking (which answer links to which question), word-level OCR text
-- **No PDF, no AcroForm** — image only
-- **Bounding boxes are absolute pixels** — normalise to 0–1 during ingest:
-  ```python
-  bbox_norm = [x0/W, y0/H, x1/W, y1/H]  # W, H = image width, height
-  ```
-- `gt_payload` = `{entity_id: answer_text}` for all answer entities
-- `quality_tier` = `"degraded"` — these are real noisy scans
-- `language` = `"en"`
+VRDU is the **only** source of native PDFs. VRDU's `dataset.jsonl.gz`
+carries `{filename, file_path, ocr, annotations}` per doc. `meta.json`
+gives per-field `match_type` (`DateMatch`, `PriceMatch`, `StringMatch`,
+…). Neither file classifies PDFs by flavour — that classification is
+ours to compute (see Section 2).
 
-### 4.2 XFUND (German + French)
-
-```python
-ds_de = load_dataset("rogerdehe/xfund", "de")
-ds_fr = load_dataset("rogerdehe/xfund", "fr")
-```
-
-- Same entity schema as FUNSD — question/answer/header/other + linking
-- Same image-only format — no PDFs
-- **XFUND bounding boxes may use a different coordinate convention**
-  depending on the HuggingFace version — verify and normalise to 0–1
-  relative coords explicitly. Do not assume they are already normalised.
-- `source` = `"xfund_de"` / `"xfund_fr"`
-- `language` = `"de"` / `"fr"`
-- `quality_tier` = `"degraded"`
-
-### 4.3 VRDU (both subsets)
-
-```bash
-git clone https://github.com/google-research-datasets/vrdu data/raw/vrdu
-```
-
-Structure after clone:
-```
-data/raw/vrdu/
-├── registration_forms/
-│   ├── pdfs/              ← raw PDFs
-│   ├── dataset.jsonl.gz   ← OCR + field annotations
-│   └── meta.json          ← field type definitions
-└── ad_buy_forms/
-    ├── pdfs/
-    ├── dataset.jsonl.gz
-    └── meta.json
-```
-
-- `dataset.jsonl.gz`: one JSON object per document, contains OCR tokens
-  with bounding boxes and human-annotated field bounding boxes
-- `meta.json`: maps field names to match types
-  (DateMatch, NumericalMatch, PriceMatch, StringMatch)
-- **This is the only dataset with real PDFs** — set `pdf_path` and `has_pdf=True`
-- Render each PDF page to PNG for `image_path` using `pypdf` + `Pillow`
-- `gt_payload` = `{field_name: value}` — directly usable as HPE-AFF payload
-- `quality_tier` = `"clean"` — digital PDFs, high-quality OCR
-- All fields have `role = "answer"` and `has_response = True`
-- Set `match_type` from `meta.json` on each field
-
-### 4.4 RVL-CDIP (invoice subset only)
-
-```python
-ds = load_dataset("chainyo/rvl-cdip-invoice")
-```
-
-- Greyscale TIFF images, one class label per document ("invoice")
-- **No field-level annotations** — `fields = []`, `gt_payload = {}`
-- `quality_tier` = `"degraded"` — aged tobacco litigation scans
-- `doc_class` = `"invoice"`
-- Used only for form family classifier training — never for fill evaluation
-- The loader API enforces this with an assertion
+Ingest modules under `src/aff/ingest/` normalise each corpus to
+`DocumentRecord`. The VRDU module also optionally renders each page to
+PNG; the synth-dataset workflow disables that side-effect.
 
 ---
 
-## 5. Stage 2 — ORDER
+## 5. Blank-form interface
 
-### Deduplication
-Hash on `(source, doc_id)` — no duplicates within source.
-For VRDU: additionally hash on `sha256(pdf_bytes)` — some documents
-appear in both registration and ad_buy splits.
+Every blank-form approach exposes the same input → output contract.
 
-### Quality scoring
-```python
-def compute_quality_score(record: DocumentRecord) -> float:
-    if not record.fields:
-        return 0.0  # RVL-CDIP
-    response_fields = [f for f in record.fields if f.has_response]
-    valid_bbox = [f for f in record.fields if _bbox_valid(f.bbox_norm)]
-    field_fill_rate = len(response_fields) / len(record.fields)
-    bbox_coverage   = len(valid_bbox) / len(record.fields)
-    return (field_fill_rate + bbox_coverage) / 2
+**Input** — per document:
+- The source artifact (PDF or PNG, depending on category).
+- A `<doc_id>.fields.json` carrying `doc_id`, `source`, `page_count`,
+  and `fields: [...]` matching the `FieldRecord` shape.
 
-def _bbox_valid(bbox: list[float]) -> bool:
-    if len(bbox) != 4:
-        return False
-    x0, y0, x1, y1 = bbox
-    return (0 <= x0 < x1 <= 1) and (0 <= y0 < y1 <= 1)
+**Output** — per document:
+```
+<out_dir>/<doc_id>/
+├── blank.pdf       blanked output
+└── labels.json     {doc_id, source, page_count, answer_fields: [...]}
 ```
 
-### Sort order
-1. `quality_tier`: clean → degraded → clean_synthetic → degraded_synthetic
-2. `quality_score` descending
-3. `source` alphabetically (deterministic tie-break)
+Plus one `manifest.jsonl` per run, one line per doc, carrying status,
+field counts, skip reasons, and approach-specific diagnostics.
 
-### Split assignment
-```python
-SPLIT_RATIOS = {"train": 0.70, "val": 0.15, "test": 0.15}
-SEED = int(os.getenv("PIPELINE_SEED", 42))
-```
-
-- Stratified by `source` — each source proportionally represented in all splits
-- VRDU records with non-empty `gt_payload` are preferentially assigned to
-  `val` and `test` — they are the highest-quality evaluation data
-- Split assignment is deterministic: same seed always produces same splits
+**Quality contract** — for any blanked output:
+1. **Residual-text test**: every `expected_value` from `labels.json` must
+   NOT appear in the page text extracted from `blank.pdf` (or from OCR
+   for image-PDFs).
+2. **Structural preservation**: drawing primitives, image XObjects,
+   table borders, underlines, and form scaffolding around answer fields
+   must remain identical. The redaction targets answer glyphs only.
+3. **Non-detectability**: no rectangular overlays, no painted-over fills,
+   no rasterisation of content that was originally vector.
 
 ---
 
-## 6. Stage 3 — CONSOLIDATE
+## 6. Approaches
 
-### Parquet master table
-Write `$DATA_ROOT/consolidated/master.parquet`:
+| Approach | Lane | Categories | Doc |
+| --- | --- | --- | --- |
+| `pymupdf-redact` | merged on `main` | born_digital_pdf, synthetic_acroform | `docs/approaches/pymupdf-redact.md` |
+| `content-stream-surgery` | worktree | born_digital_pdf, synthetic_acroform | (in flight) |
+| `overlay-mask` | worktree | born_digital_pdf, synthetic_acroform | (in flight) |
+| `page-rebuild` | worktree | born_digital_pdf, synthetic_acroform | (in flight) |
+| `image-fallback` | worktree | all four (universal) | (in flight) |
 
-| Column | Type | Notes |
-|---|---|---|
-| source | str | |
-| doc_id | str | |
-| image_path | str | |
-| pdf_path | str/null | |
-| page_count | int | |
-| quality_tier | str | |
-| quality_score | float | |
-| language | str | |
-| doc_class | str | |
-| split | str | |
-| has_pdf | bool | |
-| field_count | int | |
-| response_field_count | int | |
-| gt_payload_json | str | json.dumps(gt_payload) |
-
-One row per document. No nested structures in Parquet.
-
-### Field-level JSON index
-Write `$DATA_ROOT/consolidated/fields/{source}_{doc_id}.json`
-containing the full `DocumentRecord` as JSON including the `fields` list.
-One file per document.
-
-### Manifest
-Write `$DATA_ROOT/consolidated/manifest.json` — counts by source, split,
-quality tier. See the pipeline prompt for the full schema.
+CLI dispatcher is `src/aff/blank_forms/__main__.py:_dispatch`. It reads a
+manifest with the schema in Section 7 and routes each entry to the
+implementation for its category.
 
 ---
 
-## 7. Stage 4 — GENERATE
+## 7. Manifest schemas
 
-### 7.1 Genalog degradation
+### Golden-set / dataset manifest (`manifest.json`)
 
-```python
-from genalog.degradation.degrader import ImageDegradation
-```
+The CLI dispatcher reads this shape. Each entry:
 
-Apply to **train split only** — never val or test.
-Apply to FUNSD, XFUND, and VRDU images.
-
-Three degradation profiles:
-```python
-DEGRADATION_PROFILES = {
-    "light": [
-        ("blur", {"radius": 1}),
-        ("salt_pepper", {"amount": 0.002}),
-    ],
-    "medium": [
-        ("blur", {"radius": 2}),
-        ("salt_pepper", {"amount": 0.005}),
-        ("morphology", {"operation": "open", "kernel_shape": (3,3), "kernel_type": "ones"}),
-    ],
-    "heavy": [
-        ("blur", {"radius": 3}),
-        ("bleed_through", {"alpha": 0.8}),
-        ("salt_pepper", {"amount": 0.01}),
-        ("morphology", {"operation": "close", "kernel_shape": (9,1), "kernel_type": "ones"}),
-    ]
+```json
+{
+  "id": "vrdu_born_digital",
+  "category": "born_digital_pdf",
+  "source": "vrdu_ad_buy",
+  "doc_id": "0a32ce11-...",
+  "pdf": "vrdu_born_digital.pdf",
+  "image": null,
+  "fields_json": "vrdu_born_digital.fields.json",
+  "notes": "free-form"
 }
 ```
 
-Each degraded variant:
-- `doc_id` = `{parent_doc_id}_{profile}` e.g. `funsd_0001_medium`
-- `source` = `{parent_source}_degraded` e.g. `funsd_degraded`
-- `quality_tier` = `"degraded_synthetic"`
-- Inherits parent's `gt_payload`, `fields`, `split` = `"train"`
-- Written to `$DATA_ROOT/generated/degraded/`
+Plus a top-level `category_compatibility` map declaring which approaches
+each category supports. Reference: `tests/fixtures/golden_set/manifest.json`.
 
-If Genalog import fails (missing system deps): log a warning and skip.
-Do not crash the pipeline. Record `"genalog_available": false` in
-`pipeline_state.json`.
+`pdf` may be a path relative to the manifest directory **or** an absolute
+path. The dispatcher resolves via `golden_dir / Path(doc["pdf"])` — and
+`Path.__truediv__` treats an absolute RHS as absolute, so both work.
 
-### 7.2 Synthetic PDF generation via form_harness.py
+### Per-document field annotations (`<doc_id>.fields.json`)
 
-`form_harness.py` already exists in the repo root. Do not rewrite it.
-Import and call its `generate()` function directly:
+Consumed by `pymupdf_redact.generate_blank` and other approaches:
 
-```python
-from form_harness import generate
-
-manifest_entry = generate(schema_name, seed, out_dir)
-# Returns: {"pdf": path, "ground_truth": path, "layout": path, "fields": N, ...}
-```
-
-Generation config:
-```python
-GENERATION_CONFIG = {
-    "supplier":   {"count": 50,  "seed_base": 1000},
-    "invoice":    {"count": 50,  "seed_base": 2000},
-    "compliance": {"count": 30,  "seed_base": 3000},
-    "patient":    {"count": 30,  "seed_base": 4000},
+```json
+{
+  "doc_id": "vrdu_born_digital",
+  "source": "vrdu_ad_buy",
+  "page_count": 3,
+  "fields": [
+    { "field_id": "...", "label": "...", "value": "...",
+      "role": "answer", "bbox_norm": [x0,y0,x1,y1],
+      "page": 0, "source_fmt": "pdf", "match_type": "..." }
+  ]
 }
 ```
 
-For each generated form:
-- Load the ground truth JSON → `gt_payload`
-- Create a `DocumentRecord` with `source = "synthetic_{schema}"`,
-  `quality_tier = "clean_synthetic"`, `has_pdf = True`
-- Assign split: seed % 10 < 7 → train, < 8 → val, else test
-- Apply all 3 Genalog profiles to train-split forms
-- Add to Parquet master table and field JSON index
+### Per-run results (`manifest.jsonl`)
 
----
+Written by the CLI to the run's `--out-dir`. One JSON line per document:
 
-## 8. Stage 5 — TEST SUITE
-
-All tests live in `data_pipeline/tests/test_pipeline.py`.
-Use `conftest.py` for shared fixtures (sample records, temp directories).
-
-### CI-safe test pattern
-Tests requiring downloaded data must be skipped in CI:
-
-```python
-import os, pytest
-
-hf_offline = pytest.mark.skipif(
-    os.getenv("HF_DATASETS_OFFLINE") == "1",
-    reason="Requires downloaded HuggingFace data — skipped in CI"
-)
-
-@hf_offline
-def test_funsd_ingest_schema():
-    ...
-```
-
-Tests that work on fixtures (schema validation, manifest counts,
-loader API, synthetic PDFs) must NOT have the skip mark — they must
-run in CI.
-
-### Required tests
-
-```python
-# Stage 1 — schema + normalisation
-def test_funsd_ingest_schema()             # @hf_offline
-def test_funsd_bbox_range()               # @hf_offline
-def test_xfund_bbox_normalised()          # @hf_offline
-def test_vrdu_gt_payload_non_empty()      # @hf_offline
-def test_vrdu_pdf_paths_exist()           # @hf_offline
-def test_rvlcdip_fields_empty()           # @hf_offline
-
-# Stage 2 — ordering + splits
-def test_no_duplicate_doc_ids()           # works on fixture
-def test_split_proportions()              # works on fixture
-def test_quality_score_range()            # works on fixture
-def test_vrdu_preferred_in_val_test()     # works on fixture
-
-# Stage 3 — consolidation
-def test_parquet_readable()               # works on fixture
-def test_field_json_index_complete()      # works on fixture
-def test_manifest_counts_match_parquet()  # works on fixture
-
-# Stage 4 — generation
-def test_degraded_variants_train_only()   # works on fixture
-def test_synthetic_pdfs_have_acroform()   # works on fixture — uses data/test_forms/
-def test_genalog_output_is_image()        # @hf_offline or skip if genalog unavailable
-def test_generation_counts()              # works on fixture
-
-# Integration
-def test_hpe_aff_loader_returns_records() # works on fixture
-def test_rvlcdip_blocked_from_fill_eval() # works on fixture — tests the assertion
-def test_fill_ready_records_have_pdf()    # works on fixture
-def test_pipeline_state_status_log()      # works on fixture
+```json
+{ "doc_id": "...", "source": "...", "approach": "pymupdf-redact",
+  "status": "ok" | "skipped",
+  "redacted_field_count": 12, "widget_cleared_count": 27,
+  "skipped_fields": [{"field_id": "...", "reason": "..."}],
+  "category": "born_digital_pdf" }
 ```
 
 ---
 
-## 9. Loader API
+## 8. Datasets we produce
 
-The public interface. Write in `data_pipeline/loader.py`.
-This is what HPE-AFF and any other project calls.
+### Golden set (committed)
 
-```python
-from data_pipeline import loader
+`tests/fixtures/golden_set/` — 8 hand-curated documents covering all four
+categories. Used as the small fixed evaluation slice every approach is
+run against. See `tests/fixtures/golden_set/README.md` and `CANDIDATES.md`.
 
-# Primary HPE-AFF interface
-records = loader.load_for_hpe_aff(
-    split="val",
-    require_pdf=True,       # only records with real PDFs
-    require_gt=True,        # only records with non-empty gt_payload
-    quality_tier=None,      # None = all tiers
-)
-# Returns: list[DocumentRecord]
+### v1 dataset (in flight)
 
-# Sampling (reproducible)
-sample = loader.sample(n=50, split="val", seed=42)
+Sample-then-full rollout against VRDU's pymupdf-processable subset:
 
-# Filtering
-vrdu = loader.filter(source="vrdu_ad_buy", split="test")
-clean = loader.filter(quality_tier="clean")
+1. **Validation sample** — 200 random docs from VRDU (ad-buy + registration),
+   restricted to `born_digital_pdf` + `synthetic_acroform`. Used to
+   finetune `pymupdf-redact` and surface failure modes. Plan:
+   `/Users/mknw/.claude/plans/greedy-wiggling-pretzel.md`.
+2. **Full v1** — once `pymupdf-redact` is finetuned, run against **all**
+   categorised `born_digital_pdf` + `synthetic_acroform` forms in the
+   corpora.
 
-# Stats
-print(loader.stats())
-# {"total": N, "by_source": {...}, "by_split": {...}, "by_tier": {...}}
-```
+Storage:
+- `data/synth_dataset/<corpus>/` — final blank PDFs + labels + manifest.
+- `data/process_steps/<corpus>/` — intermediate recolor-glyph QA PDFs.
 
-**Hard rule in `load_for_hpe_aff()`:**
-```python
-assert "rvlcdip" not in record.source, (
-    "RVL-CDIP records have no field annotations and cannot be used "
-    "for fill evaluation. Filter by source before calling this function."
-)
-```
+Both directories are gitignored.
 
 ---
 
-## 10. CLI
+## 9. Tooling
 
-```bash
-python -m data_pipeline.cli run --all --seed 42
-python -m data_pipeline.cli run --stage ingest
-python -m data_pipeline.cli run --stage test
-python -m data_pipeline.cli status
-python -m data_pipeline.cli report
-python -m data_pipeline.cli export --split val --output ./export/
-```
+- **Python 3.14** via `flake.nix` (nix develop).
+- **uv** for dependency management; `uv.lock` is committed.
+- **pytest** with `pythonpath=["src"]` (see `pyproject.toml`).
+- **ruff** with `E F I B UP SIM RUF` — fix linting before committing.
+- **pylint** as a dev dep — CI runs it; warnings are not fatal but
+  per-line `# pylint: disable=...` is acceptable for known false positives
+  (see `pymupdf_redact.py` for examples).
 
-`status` reads `pipeline_state.json` and prints the latest run status.
-`report` prints the manifest summary in human-readable form.
-`export` copies the Parquet + field JSONs for a given split to a target directory.
+`direnv` (`.envrc`) auto-activates `nix develop` per worktree. Run
+`direnv allow <worktree>` once after creating a new worktree.
 
 ---
 
-## 11. Coding rules
+## 10. Workflow
 
-### Logging
-Use `structlog`. No `print()` in library code.
-Every stage logs on start and completion with record counts and elapsed time.
-
-### Error handling
-- Dataset download failure: log, skip, record in `pipeline_state.json`,
-  continue with other datasets
-- Genalog unavailable: log warning, skip degradation, continue
-- Individual record parse failure: log with `doc_id`, skip record, continue
-
-### Randomness
-All random operations use an explicit seed from `PIPELINE_SEED` env var.
-No implicit randomness anywhere.
-
-### File paths
-All paths are relative to `DATA_ROOT` env var (default: `./data`).
-Never hardcode absolute paths.
-
-### Dependencies
-No Azure SDK. No OpenAI SDK. No LLM calls. No external APIs.
-If an import tries to contact an external service at runtime,
-it is wrong — remove it.
-
----
-
-## 12. Environment variables
-
-```bash
-DATA_ROOT=./data         # where all data is written
-PIPELINE_SEED=42         # seed for all random operations
-PIPELINE_LOG_LEVEL=INFO  # DEBUG | INFO | WARNING
-HF_HOME=./data/raw/.hf_cache  # optional — redirect HuggingFace cache
-HF_DATASETS_OFFLINE=1   # set in CI to skip downloads
-```
-
-No other environment variables. No Azure. No API keys.
-
----
-
-## 13. What NOT to do
-
-| Do not | Reason |
-|---|---|
-| Call any external API at runtime | This is a standalone offline pipeline |
-| Import Azure SDK anywhere | Wrong project — belongs in HPE-AFF |
-| Use `print()` in library code | Use structlog |
-| Hardcode absolute file paths | Use DATA_ROOT |
-| Commit `data/raw/`, `data/consolidated/`, `data/generated/` | Too large, gitignored |
-| Rewrite `form_harness.py` | It already works — import and call it |
-| Apply Genalog to val or test splits | Contaminates evaluation |
-| Allow RVL-CDIP into fill evaluation | No ground truth — enforce with assertion |
-| Treat `pipeline_state.json` as record storage | Records move through dependent stages in memory |
-| Add any dependency that makes network calls at import time | Breaks offline CI |
-
----
-
-## 14. Session start
-
-```bash
-# 1. Check branch
-git branch --show-current
-
-# 2. Check pipeline state
-cat pipeline_state.json 2>/dev/null || echo "Pipeline not started"
-
-# 3. Check test state
-pytest data_pipeline/tests/ --tb=line -q 2>/dev/null | tail -15
-
-# 4. Check for uncommitted work
-git status
-
-# 5. Proceed from next incomplete stage
-```
+See `.github/CLAUDE_WORKFLOW.md` for branch, commit, and PR rules. The
+absolute rules from `CLAUDE.md` override anything in this file.
