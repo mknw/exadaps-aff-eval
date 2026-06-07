@@ -1,20 +1,28 @@
-"""Build a synth-dataset manifest from VRDU subsets.
+"""Build a synth-dataset manifest from any combination of ingest sources.
 
-Given ``data/raw/vrdu/{ad-buy,registration}-form/``, classify every PDF,
-filter to the two categories ``pymupdf-redact`` can process, optionally
-random-sample to a smaller set, and write a manifest the existing
-``aff.blank_forms`` CLI consumes without modification.
+Supported sources:
+
+* ``vrdu_ad_buy`` / ``vrdu_registration`` — PDF; classified via ``fitz``
+  into ``born_digital_pdf`` / ``synthetic_acroform`` / ``image_only_pdf``,
+  with the last dropped before manifest write (pymupdf-redact only
+  handles the first two).
+* ``funsd`` / ``xfund_de`` / ``xfund_fr`` — PNG; tagged ``image_only_png``
+  unconditionally. Routed to ``image-fallback`` by the manifest's
+  ``category_compatibility`` map.
 
 Output layout (under ``out_root``)::
 
     manifest.json
-    sample_v1.json                    # only when --sample-size given
-    ad_buy/<doc_id>.fields.json
-    registration/<doc_id>.fields.json
+    sample_v1.json                       # only when --sample-size given
+    <subdir>/<doc_id>.fields.json        # one per included doc
 
-``manifest.json`` carries absolute ``pdf`` paths into ``data/raw/vrdu/``
-so ``Path(golden_dir) / Path(doc["pdf"])`` resolves correctly without a
-copy step — ``Path.__truediv__`` treats an absolute RHS as absolute.
+The per-source output subdirs are: ``ad_buy``, ``registration``,
+``funsd``, ``xfund_de``, ``xfund_fr``.
+
+``manifest.json`` carries absolute paths in ``pdf`` *or* ``image`` (the
+other is ``null``) so ``Path(golden_dir) / Path(doc["pdf"])`` resolves
+correctly regardless of where the manifest sits — ``Path.__truediv__``
+treats an absolute RHS as absolute.
 """
 
 from __future__ import annotations
@@ -28,22 +36,47 @@ import structlog
 
 from aff.ingest.vrdu import parse_subset
 from aff.schema import DocumentRecord
-from aff.synth.classify import PdfClassification, classify_pdf
+from aff.synth.classify import (
+    PdfClassification,
+    classify_pdf,
+    image_only_png_classification,
+)
 from aff.synth.document_kind import detect_fara_subtype
 from aff.synth.sample import select_sample, sources_breakdown, write_sample_metadata
 
 log = structlog.get_logger()
 
-# source label -> (subset directory name on disk, output subdirectory).
-# Kept inline (rather than importing aff.ingest.vrdu._SUBSETS) because the
-# output subdir naming is a synth-pipeline concern, not an ingest concern.
-SUBSETS: dict[str, tuple[str, str]] = {
-    "vrdu_ad_buy": ("ad-buy-form", "ad_buy"),
-    "vrdu_registration": ("registration-form", "registration"),
+
+@dataclass(slots=True, frozen=True)
+class _SourceSpec:
+    """Static metadata for one ingest source."""
+
+    kind: str  # "pdf" | "image"
+    output_subdir: str
+    vrdu_subset: str | None = None  # only set for kind="pdf"
+
+
+SOURCES: dict[str, _SourceSpec] = {
+    "vrdu_ad_buy": _SourceSpec(kind="pdf", vrdu_subset="ad-buy-form", output_subdir="ad_buy"),
+    "vrdu_registration": _SourceSpec(kind="pdf", vrdu_subset="registration-form", output_subdir="registration"),
+    "funsd": _SourceSpec(kind="image", output_subdir="funsd"),
+    "xfund_de": _SourceSpec(kind="image", output_subdir="xfund_de"),
+    "xfund_fr": _SourceSpec(kind="image", output_subdir="xfund_fr"),
 }
 
-# Categories the pymupdf-redact lane can handle. image_only_pdf is dropped.
-_PROCESSABLE = {"born_digital_pdf", "synthetic_acroform"}
+# Categories the pymupdf-redact lane can handle. image_only_pdf and
+# image_only_png are dropped from pymupdf-redact's catalog but kept for
+# image-fallback's via the manifest's category_compatibility map.
+_PYMUPDF_REDACT_PROCESSABLE = {"born_digital_pdf", "synthetic_acroform"}
+
+# Approaches each category can be processed by — written into manifest.json
+# so each lane's CLI knows what to take.
+CATEGORY_COMPATIBILITY: dict[str, list[str]] = {
+    "synthetic_acroform": ["pymupdf-redact", "image-fallback"],
+    "born_digital_pdf": ["pymupdf-redact", "image-fallback"],
+    "image_only_pdf": ["image-fallback"],
+    "image_only_png": ["image-fallback"],
+}
 
 MANIFEST_VERSION = 1
 
@@ -55,31 +88,25 @@ class _Candidate:
     subset_subdir: str
 
 
-def _collect_candidates(
+def _collect_pdf_candidates(
     data_root: Path,
-    selected_sources: list[str],
-) -> tuple[list[_Candidate], dict[str, int]]:
-    """Walk requested VRDU subsets, classify each PDF, return processable ones."""
+    pdf_sources: list[str],
+    counts: dict[str, int],
+) -> list[_Candidate]:
+    """Classify VRDU PDFs; drop categories pymupdf-redact can't handle."""
+    if not pdf_sources:
+        return []
     vrdu_dir = data_root / "raw" / "vrdu"
     # parse_subset accepts img_dir but render_pages=False skips writes; pass
     # a placeholder rather than touching the filesystem.
     img_dir = data_root / "raw" / "vrdu_images"
     seen_sha256: set[str] = set()
-    counts: dict[str, int] = {
-        "born_digital_pdf": 0,
-        "synthetic_acroform": 0,
-        "image_only_pdf": 0,
-        "error": 0,
-    }
     candidates: list[_Candidate] = []
 
-    for source in selected_sources:
-        if source not in SUBSETS:
-            log.warning("synth.build_manifest.unknown_source", source=source)
-            continue
-        subset_name, subset_subdir = SUBSETS[source]
+    for source in pdf_sources:
+        spec = SOURCES[source]
         records = parse_subset(
-            subset_name,
+            spec.vrdu_subset,
             source,
             vrdu_dir,
             img_dir,
@@ -100,24 +127,90 @@ def _collect_candidates(
                 )
                 continue
             counts[cls.category] += 1
-            if cls.category not in _PROCESSABLE:
+            if cls.category not in _PYMUPDF_REDACT_PROCESSABLE:
                 continue
-            candidates.append(_Candidate(record, cls, subset_subdir))
+            candidates.append(_Candidate(record, cls, spec.output_subdir))
 
+    return candidates
+
+
+def _collect_image_candidates(
+    data_root: Path,
+    image_sources: list[str],
+    counts: dict[str, int],
+) -> list[_Candidate]:
+    """Ingest FUNSD / XFUND records; tag all as image_only_png."""
+    if not image_sources:
+        return []
+
+    # Lazy-import the ingesters so build_manifest stays importable when
+    # HuggingFace / requests are absent (e.g. in unit tests that only
+    # exercise the VRDU path).
+    records_by_source: dict[str, list[DocumentRecord]] = {s: [] for s in image_sources}
+
+    if "funsd" in image_sources:
+        from aff.ingest.funsd import ingest as funsd_ingest
+        records_by_source["funsd"] = funsd_ingest(data_root, seed=0)
+
+    if any(s.startswith("xfund_") for s in image_sources):
+        from aff.ingest.xfund import ingest as xfund_ingest
+        all_xfund = xfund_ingest(data_root, seed=0)
+        for s in image_sources:
+            if s.startswith("xfund_"):
+                records_by_source[s] = [r for r in all_xfund if r.source == s]
+
+    candidates: list[_Candidate] = []
+    for source in image_sources:
+        spec = SOURCES[source]
+        for record in records_by_source.get(source, []):
+            if not record.image_path:
+                continue
+            cls = image_only_png_classification(page_count=record.page_count)
+            counts[cls.category] += 1
+            candidates.append(_Candidate(record, cls, spec.output_subdir))
+    return candidates
+
+
+def _collect_candidates(
+    data_root: Path,
+    selected_sources: list[str],
+) -> tuple[list[_Candidate], dict[str, int]]:
+    """Dispatch each source to its ingest path; return all candidates + counts."""
+    counts: dict[str, int] = {
+        "born_digital_pdf": 0,
+        "synthetic_acroform": 0,
+        "image_only_pdf": 0,
+        "image_only_png": 0,
+        "error": 0,
+    }
+    valid_sources: list[str] = []
+    for source in selected_sources:
+        if source not in SOURCES:
+            log.warning("synth.build_manifest.unknown_source", source=source)
+            continue
+        valid_sources.append(source)
+
+    pdf_sources = [s for s in valid_sources if SOURCES[s].kind == "pdf"]
+    image_sources = [s for s in valid_sources if SOURCES[s].kind == "image"]
+
+    candidates: list[_Candidate] = []
+    candidates.extend(_collect_pdf_candidates(data_root, pdf_sources, counts))
+    candidates.extend(_collect_image_candidates(data_root, image_sources, counts))
     return candidates, counts
 
 
 def _manifest_entry(candidate: _Candidate) -> dict:
-    record, cls, subset_subdir = candidate.record, candidate.classification, candidate.subset_subdir
+    record, cls, subdir = candidate.record, candidate.classification, candidate.subset_subdir
     return {
         "id": record.doc_id,
         "category": cls.category,
         "source": record.source,
         "doc_id": record.doc_id,
         "subtype": detect_fara_subtype(record.doc_id),
-        "pdf": record.pdf_path,  # absolute; resolves under any --golden-set
-        "image": None,
-        "fields_json": f"{subset_subdir}/{record.doc_id}.fields.json",
+        # Exactly one of pdf / image is populated, matching the source kind.
+        "pdf": record.pdf_path,
+        "image": record.image_path if record.pdf_path is None else None,
+        "fields_json": f"{subdir}/{record.doc_id}.fields.json",
         "notes": "",
         "page_count": cls.page_count,
         "text_char_count": cls.text_char_count,
@@ -157,15 +250,13 @@ def _write_outputs(
     manifest = {
         "version": MANIFEST_VERSION,
         "description": (
-            "Synth-dataset manifest built from VRDU. Each document is one "
-            "PDF the pymupdf-redact pipeline can process (born_digital_pdf "
-            "or synthetic_acroform). image_only_pdf is dropped at build time."
+            "Synth-dataset manifest. Each document is one source PDF or image "
+            "consumable by the lane(s) listed in category_compatibility. "
+            "image_only_pdf docs from VRDU are dropped before write; "
+            "image-source corpora (FUNSD/XFUND) are tagged image_only_png."
         ),
         "documents": documents,
-        "category_compatibility": {
-            "synthetic_acroform": ["pymupdf-redact"],
-            "born_digital_pdf": ["pymupdf-redact"],
-        },
+        "category_compatibility": CATEGORY_COMPATIBILITY,
         "build_stats": build_stats,
     }
     manifest_path = out_root / "manifest.json"
@@ -199,15 +290,22 @@ def build_manifest(
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    selected_sources = sources if sources is not None else list(SUBSETS)
+    # Default = VRDU subsets only (matches earlier behavior before image
+    # corpora were added). Pass sources= explicitly to include FUNSD/XFUND.
+    selected_sources = sources if sources is not None else [
+        s for s, spec in SOURCES.items() if spec.kind == "pdf"
+    ]
     candidates, classified_counts = _collect_candidates(data_root, selected_sources)
 
     subtype_dropped = 0
     if include_subtypes is not None:
         before = len(candidates)
+        # FARA filename subtypes only apply to vrdu_registration; other
+        # sources pass through the filter unchanged.
         candidates = [
             c for c in candidates
-            if detect_fara_subtype(c.record.doc_id) in include_subtypes
+            if c.record.source != "vrdu_registration"
+            or detect_fara_subtype(c.record.doc_id) in include_subtypes
         ]
         subtype_dropped = before - len(candidates)
 
@@ -279,8 +377,8 @@ def _parse_exclude(value: str | None) -> set[str]:
     type=str,
     default=None,
     help=(
-        "Comma-separated VRDU sources to include "
-        f"(any of {', '.join(SUBSETS)}). Default: both."
+        "Comma-separated sources to include "
+        f"(any of {', '.join(SOURCES)}). Default: VRDU subsets only."
     ),
 )
 @click.option(
@@ -345,7 +443,7 @@ def main(
     click.echo(f"wrote {path}")
 
 
-__all__ = ["MANIFEST_VERSION", "SUBSETS", "build_manifest"]
+__all__ = ["CATEGORY_COMPATIBILITY", "MANIFEST_VERSION", "SOURCES", "build_manifest"]
 
 
 if __name__ == "__main__":  # pragma: no cover

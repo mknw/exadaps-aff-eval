@@ -25,20 +25,46 @@ from typing import Literal
 
 import fitz  # pymupdf
 
-PdfCategory = Literal["born_digital_pdf", "synthetic_acroform", "image_only_pdf"]
+Category = Literal[
+    "born_digital_pdf", "synthetic_acroform", "image_only_pdf", "image_only_png"
+]
+# Backwards-compat alias for callers that imported the PDF-only name.
+PdfCategory = Category
 
 
 @dataclass(slots=True)
 class PdfClassification:
-    """Result of inspecting one PDF for its blank-form category."""
+    """Result of inspecting one source document for its blank-form category.
 
-    category: PdfCategory
+    Image-only PNG sources skip the fitz-level inspection and instantiate
+    this directly via :func:`image_only_png_classification`.
+    """
+
+    category: Category
     page_count: int
     has_text: bool
     has_widgets: bool
     text_char_count: int
     widget_count: int
     error: str | None = None
+
+
+def image_only_png_classification(page_count: int = 1) -> PdfClassification:
+    """Trivial classification for PNG-source records.
+
+    FUNSD / XFUND are PNG-only by construction; nothing structural to
+    probe. ``page_count`` is always 1 for these corpora but exposed for
+    future multi-page image sources.
+    """
+    return PdfClassification(
+        category="image_only_png",
+        page_count=page_count,
+        has_text=False,
+        has_widgets=False,
+        text_char_count=0,
+        widget_count=0,
+        error=None,
+    )
 
 
 def classify_pdf(pdf_path: str | Path) -> PdfClassification:
@@ -89,7 +115,7 @@ def classify_pdf(pdf_path: str | Path) -> PdfClassification:
     has_widgets = widget_count > 0
 
     if has_text:
-        category: PdfCategory = "born_digital_pdf"
+        category: Category = "born_digital_pdf"
     elif has_widgets:
         category = "synthetic_acroform"
     else:

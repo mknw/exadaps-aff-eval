@@ -18,6 +18,7 @@ import json
 import shutil
 from pathlib import Path
 
+from aff.schema import DocumentRecord, FieldRecord
 from aff.synth.build_manifest import build_manifest
 
 GOLDEN = Path(__file__).resolve().parents[1] / "fixtures" / "golden_set"
@@ -134,3 +135,137 @@ def test_build_manifest_rejects_unknown_source(tmp_path: Path):
     manifest = json.loads(manifest_path.read_text())
     assert manifest["documents"] == []
     assert manifest["build_stats"]["included"] == 0
+
+
+# --- Image-source tests (FUNSD / XFUND) ----------------------------------
+
+
+def _fake_funsd_record(doc_id: str, image_path: Path) -> DocumentRecord:
+    return DocumentRecord(
+        source="funsd",
+        doc_id=doc_id,
+        image_path=str(image_path),
+        pdf_path=None,
+        page_count=1,
+        language="en",
+        doc_class="form",
+        fields=[
+            FieldRecord(
+                field_id="name",
+                label="name",
+                value="John Doe",
+                role="answer",
+                bbox_norm=[0.1, 0.1, 0.3, 0.15],
+                page=0,
+                source_fmt="image",
+            )
+        ],
+        quality_tier="degraded",
+    )
+
+
+def _fake_xfund_record(doc_id: str, source: str, image_path: Path) -> DocumentRecord:
+    return DocumentRecord(
+        source=source,
+        doc_id=doc_id,
+        image_path=str(image_path),
+        pdf_path=None,
+        page_count=1,
+        language="de" if source == "xfund_de" else "fr",
+        doc_class="form",
+        fields=[
+            FieldRecord(
+                field_id="x",
+                label="name",
+                value="Müller",
+                role="answer",
+                bbox_norm=[0.2, 0.2, 0.4, 0.25],
+                page=0,
+                source_fmt="image",
+            )
+        ],
+        quality_tier="degraded",
+    )
+
+
+def test_build_manifest_funsd_emits_image_only_png(tmp_path: Path, monkeypatch):
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    fake_png = data_root / "img.png"
+    fake_png.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    monkeypatch.setattr(
+        "aff.ingest.funsd.ingest",
+        lambda dr, seed: [_fake_funsd_record("42", fake_png)],
+    )
+
+    out_root = tmp_path / "out"
+    manifest_path = build_manifest(data_root, out_root, sources=["funsd"])
+    manifest = json.loads(manifest_path.read_text())
+
+    assert len(manifest["documents"]) == 1
+    entry = manifest["documents"][0]
+    assert entry["category"] == "image_only_png"
+    assert entry["source"] == "funsd"
+    assert entry["pdf"] is None
+    assert entry["image"] == str(fake_png)
+    assert entry["fields_json"] == "funsd/42.fields.json"
+    assert (out_root / "funsd" / "42.fields.json").is_file()
+
+
+def test_build_manifest_xfund_filters_by_lang(tmp_path: Path, monkeypatch):
+    """xfund.ingest returns both langs; build_manifest filters by source."""
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    de_png = data_root / "de.png"
+    de_png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    fr_png = data_root / "fr.png"
+    fr_png.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    monkeypatch.setattr(
+        "aff.ingest.xfund.ingest",
+        lambda dr, seed: [
+            _fake_xfund_record("de_1", "xfund_de", de_png),
+            _fake_xfund_record("fr_1", "xfund_fr", fr_png),
+        ],
+    )
+
+    out_root = tmp_path / "out"
+    # Only ask for the German subset; the French record must not appear.
+    manifest_path = build_manifest(data_root, out_root, sources=["xfund_de"])
+    manifest = json.loads(manifest_path.read_text())
+
+    assert {d["source"] for d in manifest["documents"]} == {"xfund_de"}
+    assert (out_root / "xfund_de" / "de_1.fields.json").is_file()
+    assert not (out_root / "xfund_fr").exists()
+
+
+def test_build_manifest_category_compatibility_lists_image_fallback():
+    """The static compatibility map must route image_only_png to image-fallback."""
+    from aff.synth.build_manifest import CATEGORY_COMPATIBILITY
+    assert CATEGORY_COMPATIBILITY["image_only_png"] == ["image-fallback"]
+    assert "image-fallback" in CATEGORY_COMPATIBILITY["born_digital_pdf"]
+
+
+def test_subtype_filter_only_applies_to_vrdu_registration(tmp_path: Path, monkeypatch):
+    """``--include-subtypes Short-Form`` must not drop FUNSD records."""
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    fake_png = data_root / "img.png"
+    fake_png.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    monkeypatch.setattr(
+        "aff.ingest.funsd.ingest",
+        lambda dr, seed: [_fake_funsd_record("82", fake_png)],
+    )
+
+    manifest_path = build_manifest(
+        data_root,
+        tmp_path / "out",
+        sources=["funsd"],
+        include_subtypes={"Short-Form"},
+    )
+    manifest = json.loads(manifest_path.read_text())
+    # The FUNSD doc has no FARA subtype tag but must survive the filter.
+    assert len(manifest["documents"]) == 1
+    assert manifest["documents"][0]["source"] == "funsd"
