@@ -34,7 +34,19 @@ def main() -> None:
                         help="Restrict to one or more document ids.")
     parser.add_argument("--debug-dir", default=None,
                         help="Write per-page classifier-overlay PNGs under this directory.")
+    parser.add_argument(
+        "--dot-bridge-px", type=int, default=0,
+        help=(
+            "Strategy A: pre-close fg mask with a horizontal kernel of this "
+            "width to bridge dot gaps before the h-rule open. 0 = off. "
+            "5-7 at 150dpi typically preserves dotted underlines."
+        ),
+    )
     args = parser.parse_args()
+
+    classifier_kwargs: dict = {}
+    if args.dot_bridge_px > 0:
+        classifier_kwargs["dot_bridge_px"] = args.dot_bridge_px
 
     manifest_path = Path(args.manifest)
     manifest = json.loads(manifest_path.read_text())
@@ -76,6 +88,7 @@ def main() -> None:
             out_dir,
             dpi=args.dpi,
             debug_dir=args.debug_dir,
+            classifier_kwargs=classifier_kwargs or None,
         )
         summary = {k: v for k, v in result.items() if k != "fields"}
         summary["field_count"] = result["redacted"]

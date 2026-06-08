@@ -67,6 +67,7 @@ def classify_window(
     tophat_kernel_px: int = 15,
     tophat_threshold: int = 20,
     dilate_text_px: int = 1,
+    dot_bridge_px: int = 0,
 ) -> Classification:
     """Classify ink pixels inside ``window`` as text / h-rule / v-rule.
 
@@ -90,6 +91,12 @@ def classify_window(
     * ``tophat_threshold=20`` cuts the top-hat response at ~8 % grey,
       catching faint grey dividers (Otsu threshold on these fixtures is
       ~159, dividers sit at ~120-150, so they're well above this cut).
+    * ``dot_bridge_px`` (default 0 = off) is Strategy A for dotted
+      fill-in lines: pre-close the fg mask with a horizontal kernel of
+      this width so dots become contiguous, then the existing h-rule
+      open catches them as h-rules and they're preserved. A value of
+      5-7 at 150 dpi bridges typical dot gaps (3-5 px) without bridging
+      inter-word gaps (10-15 px). 0 keeps the historical behavior.
     """
     x0, y0, x1, y1 = window
     crop = image[y0:y1, x0:x1]
@@ -103,7 +110,13 @@ def classify_window(
     bbox_h = max(1, bbox[3] - bbox[1])
     h_kw = _odd(max(min_h_kernel_px, round(bbox_h * h_kernel_frac)))
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kw, 1))
-    h_rule_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, h_kernel)
+    # Strategy A: pre-close to bridge dotted underlines before h-rule open.
+    fg_for_h_rule = fg_mask
+    if dot_bridge_px > 0:
+        bridge_kw = _odd(dot_bridge_px)
+        bridge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (bridge_kw, 1))
+        fg_for_h_rule = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, bridge_kernel)
+    h_rule_mask = cv2.morphologyEx(fg_for_h_rule, cv2.MORPH_OPEN, h_kernel)
 
     # Two-stage v-rule detection: top-hat then v-open.
     tophat_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (tophat_kernel_px, 1))

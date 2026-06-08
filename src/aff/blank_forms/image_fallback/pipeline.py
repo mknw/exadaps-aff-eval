@@ -133,6 +133,7 @@ def generate_blank(
     *,
     dpi: int = DEFAULT_DPI,
     debug_dir: str | Path | None = None,
+    classifier_kwargs: dict | None = None,
 ) -> dict[str, Any]:
     """Generate a blanked image-PDF for one document.
 
@@ -187,7 +188,10 @@ def generate_blank(
         for fld in by_page.get(page_idx, []):
             bbox_px = _bbox_norm_to_px(fld["bbox_norm"], w, h, padding)
             stats: RedactStats = redact_bbox(
-                page_arr, bbox_px, debug_collector=debug_collector
+                page_arr,
+                bbox_px,
+                classifier_kwargs=classifier_kwargs,
+                debug_collector=debug_collector,
             )
             per_field_stats.append(
                 {
