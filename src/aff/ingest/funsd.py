@@ -97,7 +97,10 @@ def ingest(data_root: Path, seed: int) -> list[DocumentRecord]:
 
     for split_name in ds:
         for item in ds[split_name]:
-            doc_id = str(item.get("id", f"funsd_{len(records):05d}"))
+            # The HF dataset numbers IDs from 0 within each split, so
+            # train_24 and test_24 collide on disk without the prefix.
+            raw_id = str(item.get("id", f"{len(records):05d}"))
+            doc_id = f"{split_name}_{raw_id}"
 
             img = item.get("image")
             if img is None:
