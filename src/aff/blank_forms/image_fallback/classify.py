@@ -58,10 +58,11 @@ def _odd(n: int) -> int:
 def _dotted_cc_mask(
     fg_mask: np.ndarray,
     *,
-    max_dot_size_px: int = 5,
+    max_dot_size_px: int = 6,
     y_tolerance_px: int = 2,
-    min_cluster_size: int = 3,
-    max_spacing_cv: float = 0.4,
+    min_cluster_size: int = 4,
+    max_spacing_cv: float = 0.3,
+    min_cluster_width_px: int = 20,
 ) -> np.ndarray:
     """Strategy B: find rows of small CCs with low spacing variance.
 
@@ -69,19 +70,26 @@ def _dotted_cc_mask(
     of "dotted-line" connected components are set. Pixels classified as
     such get OR'd into the rule_union so the redactor preserves them.
 
-    Tunables:
+    Tunables (v2 defaults — tightened against FPs observed on
+    ``xfund_fr`` page 228, where short character fragments under
+    ``Reglements`` were preserved as "dots"):
 
     * ``max_dot_size_px``: a "dot" is a CC with both width and height
       at-or-under this size. Bigger CCs are characters / fragments.
     * ``y_tolerance_px``: centroids within this many pixels of each
       other on the y-axis are treated as the same horizontal row.
     * ``min_cluster_size``: a row needs at least this many dot-shaped
-      CCs to qualify as a candidate line.
+      CCs to qualify as a candidate line. Raised to 4 — three small
+      CCs in a row are common in glyph descenders.
     * ``max_spacing_cv``: coefficient-of-variation cap on the
-      x-spacings of consecutive dot centroids within a row. 0.4 means
-      spacings can vary by 40% of the mean before the row is rejected.
-      Real dotted lines on printed forms come in well under this even
-      with scanner jitter.
+      x-spacings of consecutive dot centroids within a row. 0.3 means
+      spacings vary by ≤30% of the mean. Real dotted lines on printed
+      forms come in well under this even with scanner jitter.
+    * ``min_cluster_width_px``: the x-extent of the cluster
+      (rightmost - leftmost centroid) must be at least this many px.
+      Genuine dotted underlines stretch tens of pixels; clusters of
+      character fragments rarely do. This is the load-bearing guard
+      against FPs.
     """
     if fg_mask.size == 0 or not np.any(fg_mask):
         return np.zeros_like(fg_mask)
@@ -119,12 +127,15 @@ def _dotted_cc_mask(
     if current:
         clusters.append(current)
 
-    # For each cluster, check the x-spacing coefficient of variation.
+    # For each cluster, check the x-spacing coefficient of variation
+    # and the cluster's total horizontal extent.
     for cluster in clusters:
         if len(cluster) < min_cluster_size:
             continue
         cluster.sort(key=lambda t: t[1])  # by cx
         xs = np.array([c[1] for c in cluster], dtype=np.float64)
+        if (xs[-1] - xs[0]) < min_cluster_width_px:
+            continue
         spacings = np.diff(xs)
         if spacings.size == 0:
             continue
