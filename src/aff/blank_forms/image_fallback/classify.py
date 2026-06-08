@@ -55,6 +55,92 @@ def _odd(n: int) -> int:
     return int(n) | 1
 
 
+def _dotted_cc_mask(
+    fg_mask: np.ndarray,
+    *,
+    max_dot_size_px: int = 5,
+    y_tolerance_px: int = 2,
+    min_cluster_size: int = 3,
+    max_spacing_cv: float = 0.4,
+) -> np.ndarray:
+    """Strategy B: find rows of small CCs with low spacing variance.
+
+    Returns a mask the size of ``fg_mask`` (uint8, 0/255) where pixels
+    of "dotted-line" connected components are set. Pixels classified as
+    such get OR'd into the rule_union so the redactor preserves them.
+
+    Tunables:
+
+    * ``max_dot_size_px``: a "dot" is a CC with both width and height
+      at-or-under this size. Bigger CCs are characters / fragments.
+    * ``y_tolerance_px``: centroids within this many pixels of each
+      other on the y-axis are treated as the same horizontal row.
+    * ``min_cluster_size``: a row needs at least this many dot-shaped
+      CCs to qualify as a candidate line.
+    * ``max_spacing_cv``: coefficient-of-variation cap on the
+      x-spacings of consecutive dot centroids within a row. 0.4 means
+      spacings can vary by 40% of the mean before the row is rejected.
+      Real dotted lines on printed forms come in well under this even
+      with scanner jitter.
+    """
+    if fg_mask.size == 0 or not np.any(fg_mask):
+        return np.zeros_like(fg_mask)
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        fg_mask, connectivity=8
+    )
+    out = np.zeros_like(fg_mask)
+    if num_labels <= 1:
+        return out
+
+    # Filter to small candidate CCs (likely dots).
+    candidates: list[tuple[int, float, float]] = []  # (label, cx, cy)
+    for label_id in range(1, num_labels):
+        cw = stats[label_id, cv2.CC_STAT_WIDTH]
+        ch = stats[label_id, cv2.CC_STAT_HEIGHT]
+        if cw <= max_dot_size_px and ch <= max_dot_size_px:
+            cx, cy = centroids[label_id]
+            candidates.append((label_id, float(cx), float(cy)))
+
+    if len(candidates) < min_cluster_size:
+        return out
+
+    # Group by y-band: sort by cy, then cluster contiguous runs whose cy
+    # values stay within y_tolerance_px of the cluster's first member.
+    candidates.sort(key=lambda t: t[2])
+    clusters: list[list[tuple[int, float, float]]] = []
+    current: list[tuple[int, float, float]] = []
+    for cand in candidates:
+        if not current or abs(cand[2] - current[0][2]) <= y_tolerance_px:
+            current.append(cand)
+        else:
+            clusters.append(current)
+            current = [cand]
+    if current:
+        clusters.append(current)
+
+    # For each cluster, check the x-spacing coefficient of variation.
+    for cluster in clusters:
+        if len(cluster) < min_cluster_size:
+            continue
+        cluster.sort(key=lambda t: t[1])  # by cx
+        xs = np.array([c[1] for c in cluster], dtype=np.float64)
+        spacings = np.diff(xs)
+        if spacings.size == 0:
+            continue
+        mean = float(spacings.mean())
+        if mean <= 0:
+            continue
+        cv = float(spacings.std()) / mean
+        if cv > max_spacing_cv:
+            continue
+        # Mark every CC in the qualifying cluster.
+        for label_id, _, _ in cluster:
+            out[labels == label_id] = 255
+
+    return out
+
+
 def classify_window(
     image: np.ndarray,
     window: Bbox,
@@ -68,6 +154,7 @@ def classify_window(
     tophat_threshold: int = 20,
     dilate_text_px: int = 1,
     dot_bridge_px: int = 0,
+    detect_dotted_cc: bool = False,
 ) -> Classification:
     """Classify ink pixels inside ``window`` as text / h-rule / v-rule.
 
@@ -97,6 +184,10 @@ def classify_window(
       open catches them as h-rules and they're preserved. A value of
       5-7 at 150 dpi bridges typical dot gaps (3-5 px) without bridging
       inter-word gaps (10-15 px). 0 keeps the historical behavior.
+    * ``detect_dotted_cc`` (default False = off) is Strategy B: enable
+      CC-based dotted-line detection. See :func:`_dotted_cc_mask` for
+      tunables. The mask is OR'd into rule_union alongside h-rule and
+      v-rule. Composable with Strategy A.
     """
     x0, y0, x1, y1 = window
     crop = image[y0:y1, x0:x1]
@@ -127,6 +218,10 @@ def classify_window(
     v_rule_mask = cv2.morphologyEx(tophat_bin, cv2.MORPH_OPEN, v_kernel)
 
     rule_union = cv2.bitwise_or(h_rule_mask, v_rule_mask)
+
+    if detect_dotted_cc:
+        dotted_mask = _dotted_cc_mask(fg_mask)
+        rule_union = cv2.bitwise_or(rule_union, dotted_mask)
 
     text_mask = cv2.bitwise_and(fg_mask, cv2.bitwise_not(rule_union))
     if dilate_text_px > 0:

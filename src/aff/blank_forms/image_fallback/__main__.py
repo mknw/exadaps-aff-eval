@@ -42,11 +42,21 @@ def main() -> None:
             "5-7 at 150dpi typically preserves dotted underlines."
         ),
     )
+    parser.add_argument(
+        "--detect-dotted-cc", action="store_true",
+        help=(
+            "Strategy B: enable CC-based dotted-line detection. Adds the "
+            "dotted-line mask to rule_union, preserving dot rows from "
+            "redaction. Composable with --dot-bridge-px."
+        ),
+    )
     args = parser.parse_args()
 
     classifier_kwargs: dict = {}
     if args.dot_bridge_px > 0:
         classifier_kwargs["dot_bridge_px"] = args.dot_bridge_px
+    if args.detect_dotted_cc:
+        classifier_kwargs["detect_dotted_cc"] = True
 
     manifest_path = Path(args.manifest)
     manifest = json.loads(manifest_path.read_text())
