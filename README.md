@@ -72,16 +72,71 @@ data/                      all data; gitignored except data/test_forms/
 
 ## Current state
 
-- **`pymupdf-redact`** is merged. Verified end-to-end on the 2 compatible
-  golden-set docs (`synthetic_supplier.pdf`, `vrdu_born_digital.pdf`).
-- **Active sprint**: validate `pymupdf-redact` on a 200-doc random sample
-  from VRDU (641 ad-buy + 1915 registration-form PDFs). New `src/aff/synth/`
-  package handles classification, sampling, run orchestration, recolor-glyph
-  QA previews, and post-run failure analysis. Plan at
-  `/Users/mknw/.claude/plans/greedy-wiggling-pretzel.md`.
-- **Next milestone — v1 dataset**: once `pymupdf-redact` is finetuned, run
-  against **all** categorised `born_digital_pdf` + `synthetic_acroform`
-  forms across the source corpora.
+- **`pymupdf-redact`** and **`image-fallback`** are merged on `main`.
+- **`FUNXD-SYNTH v0-beta`** dataset is the first released cut — see below.
+- **Three other approach lanes** (content-stream-surgery, overlay-mask,
+  page-rebuild) are scaffolded in sibling worktrees.
+
+---
+
+## Datasets
+
+### FUNXD-SYNTH
+
+A blank-form evaluation dataset family built from FUNSD and XFUND. Each
+release is a versioned set of `(blank.pdf, labels.json)` pairs covering
+the same source corpora; downstream form-fillers are scored against the
+labels.
+
+| Codename | Source corpora | Approach | Docs |
+| --- | --- | --- | --- |
+| `funxd-synth-v0-beta` | FUNSD (199) + XFUND-de (199) + XFUND-fr (199) | image-fallback with Strategy B v2 (CC-based dotted-line preservation) at 150 dpi | 597 |
+
+#### Build it (one command)
+
+From the repo root, with the toolchain active:
+
+```bash
+uv run python -m aff.synth.build_dataset funxd-synth-v0-beta
+```
+
+Output lands at `data/synth_dataset/funxd-synth-v0-beta/`:
+
+```
+funxd-synth-v0-beta/
+├── funxd-synth-v0-beta.pdf      combined scrollable PDF, one page per doc
+├── manifest.json                 doc metadata + category_compatibility
+├── funsd/<doc_id>.fields.json    per-doc ground-truth annotations
+├── xfund_de/<doc_id>.fields.json
+├── xfund_fr/<doc_id>.fields.json
+└── out/
+    ├── <doc_id>/blank.pdf        per-doc blanked output
+    ├── <doc_id>/labels.json      per-doc labels (expected values + bboxes)
+    └── manifest.jsonl            per-run summary, one line per doc
+```
+
+The defaults (`--data-root data/`, `--out-root data/synth_dataset/`)
+match the repo's gitignored data tree; override either if you keep the
+raw corpora elsewhere. Raw FUNSD/XFUND data is downloaded by the
+ingesters on first run (FUNSD via HuggingFace, XFUND via GitHub
+releases).
+
+#### Known limitations (v0-beta)
+
+- **Median fill leaves visible answer-location ghosts.** The redactor
+  samples paper color around each answer bbox and writes the median
+  over the text pixels inside; on multi-colored backgrounds (grey
+  field + white border) the median is between, leaving a faint but
+  readable rectangle. See [issue #3](https://github.com/mknw/exadaps-aff-eval/issues/3).
+- **VRDU is not included.** All FARA registration-form documents in
+  VRDU turned out to be OCR'd scans rather than born-digital PDFs;
+  routing them correctly requires a classifier refinement that is out
+  of scope for v0-beta.
+- **Dotted-line preservation has both false positives and misses.**
+  Strategy B v2's CC-based detector eliminates the worst FPs (e.g.
+  character descenders preserved as fake dotted lines) but still drops
+  some real dotted lines that are too short or too sparsely spaced.
+  A follow-up "magic touch-up" pass is planned.
 
 ---
 
