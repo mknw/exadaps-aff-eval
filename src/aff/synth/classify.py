@@ -108,7 +108,9 @@ def classify_pdf(pdf_path: str | Path) -> PdfClassification:
             error=f"{type(exc).__name__}: {exc}",
         )
     finally:
-        if not doc.is_closed:
+        # pylint can't see fitz.Document.is_closed (set via fitz's __init__.py
+        # star-import shim, which static analysis won't follow).
+        if not doc.is_closed:  # pylint: disable=no-member
             doc.close()
 
     has_text = text_char_count > 0
