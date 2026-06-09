@@ -182,9 +182,38 @@ All defaults in `classify.classify_window`:
 | `tophat_kernel_px` | 15 | Horizontal width of the black top-hat kernel. Absolute pixels because the criterion is "thin feature in the rasterisation". |
 | `tophat_threshold` | 20 | Top-hat response cut at ~8 % grey. Catches dividers > 30 grey contrast. |
 | `dilate_text_px` | 1 | Anti-alias halo capture; re-subtracts rules afterwards. |
+| `dot_bridge_px` | 0 (off) | Strategy A — pre-close fg with a horizontal kernel of this width before the h-rule open. Bridges dot gaps so the existing h-rule open catches them as h-rules. 5–7 at 150 dpi typically preserves dotted underlines. |
+| `detect_dotted_cc` | False | Strategy B — CC clustering with spacing-variance test (`_dotted_cc_mask`). Detects rows of small CCs with low spacing CV + minimum cluster width; OR'd into `rule_union`. Composable with `dot_bridge_px`. |
+
+CLI surface (`python -m aff.blank_forms.image_fallback`):
+
+- `--dot-bridge-px N` — Strategy A toggle (`N=0` disables).
+- `--detect-dotted-cc` — Strategy B toggle.
+
+The `FUNXD-SYNTH v0-beta` release pins Strategy B with v2 defaults
+(`max_dot_size_px=6`, `min_cluster_size=4`, `max_spacing_cv=0.3`,
+`min_cluster_width_px=20`). See `_dotted_cc_mask`'s docstring for the
+rationale behind each cutoff.
 
 `PER_SOURCE_SEED_PADDING` in `pipeline.py` carries forward the funsd
 `(40, 5, 5, 5)` and xfund `(30, 5, 5, 5)` shifts learned from the
 legacy pipeline. These bias the yellow bbox before classification — the
 right place to fix systematically misaligned annotations until the
-annotation layer is corrected upstream.
+annotation layer is corrected upstream. Flagged for removal once the
+annotations are normalised; see issue #3.
+
+## Open work
+
+- **Dotted-line touch-up pass** — Strategy B trades recall for FP
+  suppression; some real dotted lines still drop. Planned post-pass
+  finds detected dotted-line clusters with gaps inside previously-
+  erased answer bboxes and paints synthetic dots into the gap at the
+  cluster's mean spacing.
+- **Redaction-fill noise / per-pixel sampling** — current median fill
+  reveals answer-location ghosts on multi-coloured backgrounds. See
+  issue #3 for exploration directions (per-pixel paper sampling,
+  calibrated Gaussian noise, background-pattern continuation).
+- **Acroform clear unification** — `_clear_acroform_widgets` here
+  strips `/V` and `/AP` only; pymupdf-redact's `acroform_clear.py`
+  also strips `/DV` and `/MK /BG` (commit `51df4f2`). Belt-and-braces
+  alignment is queued so both lanes match.

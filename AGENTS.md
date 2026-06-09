@@ -122,14 +122,22 @@ field counts, skip reasons, and approach-specific diagnostics.
 | Approach | Lane | Categories | Doc |
 | --- | --- | --- | --- |
 | `pymupdf-redact` | merged on `main` | born_digital_pdf, synthetic_acroform | `docs/approaches/pymupdf-redact.md` |
+| `image-fallback` | merged on `main` | all four (universal) | `docs/approaches/image-fallback.md` |
 | `content-stream-surgery` | worktree | born_digital_pdf, synthetic_acroform | (in flight) |
 | `overlay-mask` | worktree | born_digital_pdf, synthetic_acroform | (in flight) |
 | `page-rebuild` | worktree | born_digital_pdf, synthetic_acroform | (in flight) |
-| `image-fallback` | worktree | all four (universal) | (in flight) |
 
-CLI dispatcher is `src/aff/blank_forms/__main__.py:_dispatch`. It reads a
-manifest with the schema in Section 7 and routes each entry to the
-implementation for its category.
+Two CLIs ship today:
+
+- `src/aff/blank_forms/__main__.py:_dispatch` routes a manifest by
+  `category` and applies the appropriate pymupdf-redact / acroform-clear
+  implementation. Image-only categories are skipped.
+- `src/aff/blank_forms/image_fallback/__main__.py` filters a manifest
+  via `category_compatibility["image-fallback"]` and applies the
+  image-fallback `generate_blank` per doc. Handles every category.
+
+The synth-dataset orchestrator (`aff.synth.build_dataset`) selects which
+lane to drive per its recipe — see Section 8.
 
 ---
 
@@ -198,23 +206,54 @@ Written by the CLI to the run's `--out-dir`. One JSON line per document:
 categories. Used as the small fixed evaluation slice every approach is
 run against. See `tests/fixtures/golden_set/README.md` and `CANDIDATES.md`.
 
-### v1 dataset (in flight)
+### FUNXD-SYNTH
 
-Sample-then-full rollout against VRDU's pymupdf-processable subset:
+Versioned dataset family built from FUNSD + XFUND via the image-fallback
+lane. Each release is pinned by a named `Recipe` in
+`src/aff/synth/build_dataset.py::RECIPES`.
 
-1. **Validation sample** — 200 random docs from VRDU (ad-buy + registration),
-   restricted to `born_digital_pdf` + `synthetic_acroform`. Used to
-   finetune `pymupdf-redact` and surface failure modes. Plan:
-   `/Users/mknw/.claude/plans/greedy-wiggling-pretzel.md`.
-2. **Full v1** — once `pymupdf-redact` is finetuned, run against **all**
-   categorised `born_digital_pdf` + `synthetic_acroform` forms in the
-   corpora.
+| Codename | Sources | Approach | Docs |
+| --- | --- | --- | --- |
+| `funxd-synth-v0-beta` | FUNSD (199) + XFUND-de (199) + XFUND-fr (199) | image-fallback, Strategy B v2 (`detect_dotted_cc=True`) @ 150 dpi | 597 |
 
-Storage:
-- `data/synth_dataset/<corpus>/` — final blank PDFs + labels + manifest.
-- `data/process_steps/<corpus>/` — intermediate recolor-glyph QA PDFs.
+One-command build:
 
-Both directories are gitignored.
+```bash
+uv run python -m aff.synth.build_dataset funxd-synth-v0-beta
+```
+
+Output under `data/synth_dataset/<codename>/`:
+
+```
+<codename>.pdf                          combined scrollable PDF, one page per doc
+manifest.json                            doc metadata + category_compatibility
+funsd|xfund_de|xfund_fr/<doc_id>.fields.json   per-doc annotations
+out/<doc_id>/{blank.pdf, labels.json}   per-doc blanked artifacts
+out/manifest.jsonl                       per-run summary, one line per doc
+```
+
+Known limitations of v0-beta are documented in README and tracked on
+GitHub issue #3 (median-fill ghost characters, bbox-extent label
+clipping).
+
+### VRDU — deferred
+
+VRDU was originally targeted for a sample-then-full pymupdf-redact rollout
+(`/Users/mknw/.claude/plans/greedy-wiggling-pretzel.md`). Discovery during
+the validation phase: the entire `vrdu_registration` corpus is scans-
+with-OCR-layer rather than born-digital, so the classifier mis-routes
+them and pymupdf-redact has near-zero correct VRDU targets. Routing them
+to image-fallback requires a classifier refinement (detect full-page
+image XObjects → new `ocrd_pdf` category) that is queued but not landed.
+The validation-run metadata is archived under
+`data/synth_dataset/_archive/` (gitignored).
+
+### Storage layout
+
+- `data/synth_dataset/<codename>/` — final blank PDFs + labels + manifest.
+- `data/process_steps/<codename>/` — intermediate QA artifacts (preview
+  PDFs, debug overlays).
+- Both gitignored.
 
 ---
 
