@@ -55,7 +55,24 @@ def _odd(n: int) -> int:
     return int(n) | 1
 
 
-def _dotted_cc_mask(
+@dataclass(slots=True, frozen=True)
+class DottedCluster:
+    """One qualifying row of dots discovered by :func:`find_dotted_clusters`.
+
+    Carries enough information to (a) paint the cluster's CCs back onto
+    a mask, and (b) characterise its spacing for the post-redaction
+    touch-up pass that fills in missing dots.
+    """
+
+    label_ids: list[int]
+    x_positions: np.ndarray  # sorted CC centroid x's
+    y_center: float          # mean CC centroid y
+    mean_spacing_px: float
+    median_dot_width_px: int
+    median_dot_height_px: int
+
+
+def find_dotted_clusters(
     fg_mask: np.ndarray,
     *,
     max_dot_size_px: int = 6,
@@ -63,12 +80,13 @@ def _dotted_cc_mask(
     min_cluster_size: int = 4,
     max_spacing_cv: float = 0.3,
     min_cluster_width_px: int = 20,
-) -> np.ndarray:
-    """Strategy B: find rows of small CCs with low spacing variance.
+    gap_tolerant: bool = False,
+) -> tuple[np.ndarray, list[DottedCluster]]:
+    """Find qualifying dotted-line CC clusters in ``fg_mask``.
 
-    Returns a mask the size of ``fg_mask`` (uint8, 0/255) where pixels
-    of "dotted-line" connected components are set. Pixels classified as
-    such get OR'd into the rule_union so the redactor preserves them.
+    Returns ``(labels, clusters)`` where ``labels`` is the
+    :func:`cv2.connectedComponentsWithStats` label image (kept so
+    callers can paint CCs back onto a mask without recomputing CC).
 
     Tunables (v2 defaults — tightened against FPs observed on
     ``xfund_fr`` page 228, where short character fragments under
@@ -79,8 +97,8 @@ def _dotted_cc_mask(
     * ``y_tolerance_px``: centroids within this many pixels of each
       other on the y-axis are treated as the same horizontal row.
     * ``min_cluster_size``: a row needs at least this many dot-shaped
-      CCs to qualify as a candidate line. Raised to 4 — three small
-      CCs in a row are common in glyph descenders.
+      CCs to qualify as a candidate line. 4 — three small CCs in a row
+      are common in glyph descenders.
     * ``max_spacing_cv``: coefficient-of-variation cap on the
       x-spacings of consecutive dot centroids within a row. 0.3 means
       spacings vary by ≤30% of the mean. Real dotted lines on printed
@@ -90,46 +108,54 @@ def _dotted_cc_mask(
       Genuine dotted underlines stretch tens of pixels; clusters of
       character fragments rarely do. This is the load-bearing guard
       against FPs.
+    * ``gap_tolerant``: when True, the spacing-CV check is computed
+      from the cluster's "normal" spacings only — spacings within 1.5x
+      of the median. Wide gaps (e.g. caused by a previous erasure)
+      don't inflate the CV. Used by the post-erase touch-up pass to
+      re-discover dotted lines whose middle has been redacted. Default
+      False — Strategy B detection on intact pages stays strict.
     """
     if fg_mask.size == 0 or not np.any(fg_mask):
-        return np.zeros_like(fg_mask)
+        return np.zeros_like(fg_mask, dtype=np.int32), []
 
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
         fg_mask, connectivity=8
     )
-    out = np.zeros_like(fg_mask)
     if num_labels <= 1:
-        return out
+        return labels, []
 
-    # Filter to small candidate CCs (likely dots).
-    candidates: list[tuple[int, float, float]] = []  # (label, cx, cy)
+    # Filter to small candidate CCs (likely dots). Carry size info for
+    # the median-dot calc later.
+    candidates: list[tuple[int, float, float, int, int]] = []
+    # tuple: (label, cx, cy, width, height)
     for label_id in range(1, num_labels):
         cw = stats[label_id, cv2.CC_STAT_WIDTH]
         ch = stats[label_id, cv2.CC_STAT_HEIGHT]
         if cw <= max_dot_size_px and ch <= max_dot_size_px:
             cx, cy = centroids[label_id]
-            candidates.append((label_id, float(cx), float(cy)))
+            candidates.append((label_id, float(cx), float(cy), int(cw), int(ch)))
 
     if len(candidates) < min_cluster_size:
-        return out
+        return labels, []
 
     # Group by y-band: sort by cy, then cluster contiguous runs whose cy
     # values stay within y_tolerance_px of the cluster's first member.
     candidates.sort(key=lambda t: t[2])
-    clusters: list[list[tuple[int, float, float]]] = []
-    current: list[tuple[int, float, float]] = []
+    grouped: list[list[tuple[int, float, float, int, int]]] = []
+    current: list[tuple[int, float, float, int, int]] = []
     for cand in candidates:
         if not current or abs(cand[2] - current[0][2]) <= y_tolerance_px:
             current.append(cand)
         else:
-            clusters.append(current)
+            grouped.append(current)
             current = [cand]
     if current:
-        clusters.append(current)
+        grouped.append(current)
 
     # For each cluster, check the x-spacing coefficient of variation
     # and the cluster's total horizontal extent.
-    for cluster in clusters:
+    results: list[DottedCluster] = []
+    for cluster in grouped:
         if len(cluster) < min_cluster_size:
             continue
         cluster.sort(key=lambda t: t[1])  # by cx
@@ -139,16 +165,55 @@ def _dotted_cc_mask(
         spacings = np.diff(xs)
         if spacings.size == 0:
             continue
-        mean = float(spacings.mean())
+        if gap_tolerant:
+            # Filter out spacings beyond 1.5x the median — the gap-induced
+            # outliers — and compute the CV from the remainder. A wide
+            # gap from a redacted region doesn't reject the cluster.
+            median_s = float(np.median(spacings))
+            cutoff = max(median_s * 1.5, 1.0)
+            normal = spacings[spacings <= cutoff]
+            if normal.size < 2:
+                continue
+            mean = float(normal.mean())
+            std = float(normal.std())
+        else:
+            mean = float(spacings.mean())
+            std = float(spacings.std())
         if mean <= 0:
             continue
-        cv = float(spacings.std()) / mean
-        if cv > max_spacing_cv:
+        cv_ratio = std / mean
+        if cv_ratio > max_spacing_cv:
             continue
-        # Mark every CC in the qualifying cluster.
-        for label_id, _, _ in cluster:
-            out[labels == label_id] = 255
+        widths = [c[3] for c in cluster]
+        heights = [c[4] for c in cluster]
+        results.append(
+            DottedCluster(
+                label_ids=[c[0] for c in cluster],
+                x_positions=xs,
+                y_center=float(np.mean([c[2] for c in cluster])),
+                mean_spacing_px=mean,
+                median_dot_width_px=int(np.median(widths)),
+                median_dot_height_px=int(np.median(heights)),
+            )
+        )
 
+    return labels, results
+
+
+def _dotted_cc_mask(fg_mask: np.ndarray, **kwargs) -> np.ndarray:
+    """Strategy B mask: pixel union of qualifying dotted-line clusters.
+
+    Thin wrapper over :func:`find_dotted_clusters` that paints the
+    cluster CCs onto a fresh mask. Used inside ``classify_window`` and
+    composable with the rest of the rule masks.
+    """
+    if fg_mask.size == 0 or not np.any(fg_mask):
+        return np.zeros_like(fg_mask)
+    labels, clusters = find_dotted_clusters(fg_mask, **kwargs)
+    out = np.zeros_like(fg_mask)
+    for cluster in clusters:
+        for lid in cluster.label_ids:
+            out[labels == lid] = 255
     return out
 
 

@@ -50,6 +50,16 @@ def main() -> None:
             "redaction. Composable with --dot-bridge-px."
         ),
     )
+    parser.add_argument(
+        "--touch-up-dotted-lines", action="store_true",
+        help=(
+            "After per-bbox erasure, run a post-pass that detects dotted-"
+            "line clusters and fills gaps inside the erased bboxes with "
+            "synthetic dots matching the surviving cluster's spacing + "
+            "ink colour. Only paints inside previously-erased bboxes; "
+            "cannot create dotted-line artifacts elsewhere on the page."
+        ),
+    )
     args = parser.parse_args()
 
     classifier_kwargs: dict = {}
@@ -99,6 +109,7 @@ def main() -> None:
             dpi=args.dpi,
             debug_dir=args.debug_dir,
             classifier_kwargs=classifier_kwargs or None,
+            touch_up_dotted_lines=args.touch_up_dotted_lines,
         )
         summary = {k: v for k, v in result.items() if k != "fields"}
         summary["field_count"] = result["redacted"]
