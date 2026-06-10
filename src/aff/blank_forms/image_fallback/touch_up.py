@@ -48,10 +48,30 @@ Bbox = tuple[int, int, int, int]  # (x0, y0, x1, y1) in absolute image coords
 
 # A gap is considered "punched" (worth filling) only when the existing
 # spacing between two adjacent dots is at least this fraction more than
-# the cluster's mean. Below the threshold we leave the spacing alone —
-# typical scanner jitter pushes individual spacings up to ~1.3x the
-# mean and we don't want to inject extra dots into normal variation.
-GAP_THRESHOLD_RATIO = 1.5
+# the cluster's mean. Below the threshold we leave the spacing alone.
+# 1.3 lets us catch the smaller sub-gaps within a partially-broken
+# cluster that 1.5 missed in the v1 touch-up smoke (e.g. xfund page
+# 397 where some bits remained missing even on lines that touch-up
+# otherwise found).
+GAP_THRESHOLD_RATIO = 1.3
+
+# Detection thresholds for the gap-tolerant cluster pass.
+#
+# Looser than Strategy B's (in classify.py) because the touch-up only
+# paints inside previously-erased bboxes — the FP-suppression cost of
+# detecting "almost a dotted line" outside an erased region is zero
+# (we never paint there). Strategy B has to be strict because its
+# decision happens during the live erase pass; touch-up runs after.
+TOUCH_UP_MIN_CLUSTER_SIZE = 3        # was 4 — catch short surviving fragments on each side
+TOUCH_UP_MIN_CLUSTER_WIDTH_PX = 10   # was 20 — same intent
+TOUCH_UP_MAX_SPACING_CV = 0.4        # was 0.3 — gap-tolerant filter already strips outliers
+
+# Otsu thresholding peels off the anti-aliased rim of small dots, so
+# the CC bbox underestimates the visible dot size. Inflate the painted
+# dot radius to compensate; ~1.2 matches the visual size on the xfund
+# fixtures (e.g. page 396 where synthetic dots were noticeably smaller
+# than survivors at the v1 default of 1.0).
+DOT_SIZE_INFLATE = 1.2
 
 
 def _sample_ink_colour(
@@ -96,8 +116,8 @@ def _paint_dot(
     Uses a filled ellipse so the dot matches the visual character of
     printed dots (round-ish, not square). Mutates ``image`` in place.
     """
-    radius_x = max(1, width_px // 2)
-    radius_y = max(1, height_px // 2)
+    radius_x = max(1, round(width_px * DOT_SIZE_INFLATE / 2))
+    radius_y = max(1, round(height_px * DOT_SIZE_INFLATE / 2))
     cv2.ellipse(
         image,
         (round(cx), round(cy)),
@@ -143,9 +163,9 @@ def complete_dotted_lines_in_bboxes(
     *,
     max_dot_size_px: int = 6,
     y_tolerance_px: int = 2,
-    min_cluster_size: int = 4,
-    max_spacing_cv: float = 0.3,
-    min_cluster_width_px: int = 20,
+    min_cluster_size: int = TOUCH_UP_MIN_CLUSTER_SIZE,
+    max_spacing_cv: float = TOUCH_UP_MAX_SPACING_CV,
+    min_cluster_width_px: int = TOUCH_UP_MIN_CLUSTER_WIDTH_PX,
 ) -> int:
     """Paint synthetic dots into dotted-line gaps inside erased bboxes.
 
@@ -201,4 +221,11 @@ def complete_dotted_lines_in_bboxes(
     return painted
 
 
-__all__ = ["GAP_THRESHOLD_RATIO", "complete_dotted_lines_in_bboxes"]
+__all__ = [
+    "DOT_SIZE_INFLATE",
+    "GAP_THRESHOLD_RATIO",
+    "TOUCH_UP_MAX_SPACING_CV",
+    "TOUCH_UP_MIN_CLUSTER_SIZE",
+    "TOUCH_UP_MIN_CLUSTER_WIDTH_PX",
+    "complete_dotted_lines_in_bboxes",
+]

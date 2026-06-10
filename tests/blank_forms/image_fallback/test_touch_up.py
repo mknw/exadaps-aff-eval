@@ -117,4 +117,4 @@ def test_painted_dots_match_cluster_spacing():
 
 def test_gap_threshold_ratio_default():
     """Guard against silent change of the gap-detection threshold."""
-    assert GAP_THRESHOLD_RATIO == 1.5
+    assert GAP_THRESHOLD_RATIO == 1.3
