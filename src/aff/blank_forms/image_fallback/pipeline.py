@@ -33,6 +33,7 @@ from pypdf.generic import NameObject, TextStringObject
 
 from aff.blank_forms.image_fallback.debug import save_classification_debug
 from aff.blank_forms.image_fallback.redact import DebugRecord, RedactStats, redact_bbox
+from aff.blank_forms.image_fallback.touch_up import complete_dotted_lines_in_bboxes
 
 DEFAULT_DPI = 300
 
@@ -134,6 +135,7 @@ def generate_blank(
     dpi: int = DEFAULT_DPI,
     debug_dir: str | Path | None = None,
     classifier_kwargs: dict | None = None,
+    touch_up_dotted_lines: bool = False,
 ) -> dict[str, Any]:
     """Generate a blanked image-PDF for one document.
 
@@ -180,13 +182,16 @@ def generate_blank(
 
     debug_root = Path(debug_dir) if debug_dir else None
     per_field_stats: list[dict[str, Any]] = []
+    touch_up_dots: int = 0
     for page_idx, page_arr in enumerate(pages):
         h, w = page_arr.shape[:2]
         pre_page = page_arr.copy() if debug_root else None
         debug_collector: list[DebugRecord] | None = [] if debug_root else None
+        erased_bboxes_this_page: list[tuple[int, int, int, int]] = []
 
         for fld in by_page.get(page_idx, []):
             bbox_px = _bbox_norm_to_px(fld["bbox_norm"], w, h, padding)
+            erased_bboxes_this_page.append(bbox_px)
             stats: RedactStats = redact_bbox(
                 page_arr,
                 bbox_px,
@@ -200,6 +205,28 @@ def generate_blank(
                     "bbox_px": list(bbox_px),
                     **asdict(stats),
                 }
+            )
+
+        if touch_up_dotted_lines and erased_bboxes_this_page:
+            # Reuse Strategy B's tunables for the touch-up cluster
+            # detector so what the post-pass "sees" matches what the
+            # redactor preserved.
+            cluster_kwargs = {
+                k: v
+                for k, v in (classifier_kwargs or {}).items()
+                if k
+                in {
+                    "max_dot_size_px",
+                    "y_tolerance_px",
+                    "min_cluster_size",
+                    "max_spacing_cv",
+                    "min_cluster_width_px",
+                }
+            }
+            touch_up_dots += complete_dotted_lines_in_bboxes(
+                page_arr,
+                erased_bboxes_this_page,
+                **cluster_kwargs,
             )
 
         if debug_root and debug_collector and pre_page is not None:
@@ -237,5 +264,6 @@ def generate_blank(
         "dpi": dpi,
         "render": category_render,
         "padding": list(padding),
+        "touch_up_dots": touch_up_dots,
         "fields": per_field_stats,
     }
