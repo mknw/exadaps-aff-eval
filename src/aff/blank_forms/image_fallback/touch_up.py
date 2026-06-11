@@ -79,6 +79,13 @@ TOUCH_UP_Y_TOLERANCE_PX = 3
 # patch, so the clone captures the full anti-aliased rim Otsu would drop.
 _PATCH_MARGIN_PX = 1
 
+# Document-level gate: a page needs at least this many dotted-line
+# clusters before any are trusted. A normal-line form that yields only
+# a couple of "dotted" detections (a fragmented solid rule, stray marks)
+# is suppressed. Kept low so genuinely sparse dotted forms (e.g. xfund
+# fr_train_65 with ~10 clusters) are spared.
+MIN_DOTTED_CLUSTERS_PER_PAGE = 5
+
 
 @dataclass(slots=True)
 class GapFill:
@@ -231,6 +238,7 @@ def complete_dotted_lines_in_bboxes(
     min_cluster_size: int = TOUCH_UP_MIN_CLUSTER_SIZE,
     max_spacing_cv: float = TOUCH_UP_MAX_SPACING_CV,
     min_cluster_width_px: int = TOUCH_UP_MIN_CLUSTER_WIDTH_PX,
+    min_dotted_clusters: int = MIN_DOTTED_CLUSTERS_PER_PAGE,
 ) -> TouchUpResult:
     """Clone-stamp dots into dotted-line gaps inside erased bboxes.
 
@@ -239,6 +247,12 @@ def complete_dotted_lines_in_bboxes(
     ``gaps`` / ``rejected`` / ``stamped_points`` / ``baselines`` carry
     the geometry the debug overlay renders; ``notes`` explains misses.
     All fields are cheap to populate, so they're always filled.
+
+    ``min_dotted_clusters`` is a document-level gate: a page must show at
+    least this many dotted-line clusters for any to be trusted. Below it,
+    the few detections are treated as spurious (a fragmented solid rule,
+    stray marks in a normal-line form) and nothing is stamped. Set 0 to
+    disable.
     """
     result = TouchUpResult()
     if image.size == 0 or not erased_bboxes:
@@ -258,6 +272,13 @@ def complete_dotted_lines_in_bboxes(
     )
     result.clusters = clusters
     result.rejected = rejected
+
+    # Document-level gate: too few dotted lines on the page means the few
+    # detections are likely spurious. Keep the geometry (so the debug
+    # overlay still shows what was suppressed) but stamp nothing.
+    if len(clusters) < min_dotted_clusters:
+        result.notes.append(f"below_dotted_threshold:{len(clusters)}<{min_dotted_clusters}")
+        return result
 
     half_w = max(1, max_dot_size_px // 2 + _PATCH_MARGIN_PX)
     half_h = half_w
@@ -323,6 +344,8 @@ def complete_dotted_lines_in_bboxes(
 
 __all__ = [
     "GAP_THRESHOLD_RATIO",
+    "MIN_DOTTED_CLUSTERS_PER_PAGE",
+    "TOUCH_UP_MAX_DOT_SIZE_PX",
     "TOUCH_UP_MAX_SPACING_CV",
     "TOUCH_UP_MIN_CLUSTER_SIZE",
     "TOUCH_UP_MIN_CLUSTER_WIDTH_PX",

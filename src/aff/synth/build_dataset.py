@@ -32,6 +32,13 @@ log = structlog.get_logger()
 
 Approach = Literal["image-fallback", "pymupdf-redact"]
 
+# Documents excluded from every release, with rationale. Auditable +
+# reproducible: the source of truth for "why isn't doc X in the dataset?".
+# See docs/dataset-exclusions.md for the longer-form log.
+EXCLUSIONS: dict[str, str] = {
+    "fr_train_70": "mislabeled annotations — answer bboxes don't match the rendered content",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class Recipe:
@@ -44,6 +51,8 @@ class Recipe:
     dpi: int = 150
     classifier_kwargs: dict = field(default_factory=dict)
     include_subtypes: set[str] | None = None
+    exclude_doc_ids: frozenset[str] = frozenset()
+    touch_up_dotted_lines: bool = False
 
 
 RECIPES: dict[str, Recipe] = {
@@ -51,14 +60,16 @@ RECIPES: dict[str, Recipe] = {
         name="funxd-synth-v0-beta",
         description=(
             "FUNXD-SYNTH v0-beta. Blanked FUNSD + XFUND_de + XFUND_fr "
-            "(597 docs) via image-fallback with Strategy B v2 (CC-based "
-            "dotted-line preservation) at 150 dpi. Known issues per "
-            "GitHub issue #3 — see README."
+            "via image-fallback with Strategy B (CC-based dotted-line "
+            "preservation) + clone-stamp touch-up at 150 dpi. Known "
+            "issues per GitHub issue #3 — see README."
         ),
         sources=["funsd", "xfund_de", "xfund_fr"],
         approach="image-fallback",
         dpi=150,
         classifier_kwargs={"detect_dotted_cc": True},
+        exclude_doc_ids=frozenset(EXCLUSIONS),
+        touch_up_dotted_lines=True,
     ),
 }
 
@@ -112,6 +123,7 @@ def _run_blank_forms(
                 doc_out,
                 dpi=recipe.dpi,
                 classifier_kwargs=recipe.classifier_kwargs or None,
+                touch_up_dotted_lines=recipe.touch_up_dotted_lines,
             )
             summary = {k: v for k, v in result.items() if k != "fields"}
             summary["field_count"] = result["redacted"]
@@ -162,6 +174,7 @@ def build_dataset(recipe_name: str, data_root: Path, out_root: Path) -> Path:
         out_root=dataset_dir,
         sources=recipe.sources,
         include_subtypes=recipe.include_subtypes,
+        exclude_doc_ids=set(recipe.exclude_doc_ids),
     )
 
     run_out_dir = dataset_dir / "out"
@@ -206,7 +219,7 @@ def main(recipe_name: str, data_root: Path, out_root: Path) -> None:
     click.echo(f"wrote {combined}")
 
 
-__all__ = ["RECIPES", "Recipe", "build_dataset"]
+__all__ = ["EXCLUSIONS", "RECIPES", "Recipe", "build_dataset"]
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -19,6 +19,16 @@ def test_funxd_synth_v0_beta_recipe_is_pinned():
     assert r.dpi == 150
     assert r.classifier_kwargs == {"detect_dotted_cc": True}
     assert r.include_subtypes is None
+    assert r.touch_up_dotted_lines is True
+    # fr_train_70 (mislabeled) is excluded from the release.
+    assert "fr_train_70" in r.exclude_doc_ids
+
+
+def test_exclusions_documented():
+    """Every EXCLUSIONS entry carries a non-empty rationale."""
+    from aff.synth.build_dataset import EXCLUSIONS
+    assert "fr_train_70" in EXCLUSIONS
+    assert all(reason.strip() for reason in EXCLUSIONS.values())
 
 
 def test_unknown_recipe_raises(tmp_path: Path):
@@ -71,13 +81,17 @@ def test_build_dataset_dispatches_correct_lane(tmp_path: Path, monkeypatch):
     # Capture the lane that was invoked plus its kwargs.
     calls: list[dict] = []
 
-    def fake_image_fallback(input_path, fields_path, out_dir, *, dpi, classifier_kwargs=None):
+    def fake_image_fallback(
+        input_path, fields_path, out_dir, *, dpi, classifier_kwargs=None,
+        touch_up_dotted_lines=False,
+    ):
         calls.append(
             {
                 "input_path": input_path,
                 "out_dir": out_dir,
                 "dpi": dpi,
                 "classifier_kwargs": classifier_kwargs,
+                "touch_up_dotted_lines": touch_up_dotted_lines,
             }
         )
         Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -110,6 +124,7 @@ def test_build_dataset_dispatches_correct_lane(tmp_path: Path, monkeypatch):
     assert len(calls) == 1
     assert calls[0]["dpi"] == 150
     assert calls[0]["classifier_kwargs"] == {"detect_dotted_cc": True}
+    assert calls[0]["touch_up_dotted_lines"] is True
 
     # Per-run jsonl exists with the one summary line.
     jsonl = tmp_path / "out" / "funxd-synth-v0-beta" / "out" / "manifest.jsonl"
