@@ -58,6 +58,13 @@ GAP_THRESHOLD_RATIO = 1.3
 # Looser than Strategy B's (classify.py) because the touch-up only paints
 # inside previously-erased bboxes — the cost of detecting "almost a
 # dotted line" outside an erased region is zero (we never paint there).
+# Bolder dotted lines render dots at 7-8 px; at 6 they fill nothing
+# (xfund fr_train_46 / fr_train_83). A sweep showed cluster counts
+# plateau by 8 (going higher only starts admitting character strokes)
+# and the working small-dot docs are barely affected. Strategy B keeps
+# the stricter 6 — it decides during the live erase where a false
+# preserve is permanent.
+TOUCH_UP_MAX_DOT_SIZE_PX = 8         # vs Strategy B's 6
 TOUCH_UP_MIN_CLUSTER_SIZE = 3        # vs Strategy B's 4 — short surviving fragments still count
 TOUCH_UP_MIN_CLUSTER_WIDTH_PX = 10   # vs 20
 TOUCH_UP_MAX_SPACING_CV = 0.4        # vs 0.3 — gap-tolerant filter strips outliers first
@@ -219,7 +226,7 @@ def complete_dotted_lines_in_bboxes(
     image: np.ndarray,
     erased_bboxes: Sequence[Bbox],
     *,
-    max_dot_size_px: int = 6,
+    max_dot_size_px: int = TOUCH_UP_MAX_DOT_SIZE_PX,
     y_tolerance_px: int = TOUCH_UP_Y_TOLERANCE_PX,
     min_cluster_size: int = TOUCH_UP_MIN_CLUSTER_SIZE,
     max_spacing_cv: float = TOUCH_UP_MAX_SPACING_CV,

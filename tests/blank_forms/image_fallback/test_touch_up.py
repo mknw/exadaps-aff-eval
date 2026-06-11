@@ -174,5 +174,32 @@ def test_single_sided_note_when_no_far_anchor():
     assert any("single_sided" in n for n in out.notes)
 
 
+def test_fills_bold_dots_above_strategy_b_cap():
+    """7-8 px dots (xfund fr_train_46/83) must be healed by the touch-up.
+
+    Strategy B's 6 px cap excludes them; the touch-up's looser 8 px cap
+    catches them. dot_radius=3 → ~7 px dots.
+    """
+    spacing = 14
+    img, y_center = _make_dotted_line_image(width=520, spacing=spacing, dot_radius=3)
+    bbox = (200, y_center - 6, 340, y_center + 6)
+    _erase_region(img, *bbox)
+    out = complete_dotted_lines_in_bboxes(img, [bbox])
+    assert out.dots_painted > 0
+
+    # Sanity: the same line is NOT healed under Strategy B's stricter cap.
+    img2, yc2 = _make_dotted_line_image(width=520, spacing=spacing, dot_radius=3)
+    _erase_region(img2, 200, yc2 - 6, 340, yc2 + 6)
+    strict = complete_dotted_lines_in_bboxes(
+        img2, [(200, yc2 - 6, 340, yc2 + 6)], max_dot_size_px=6
+    )
+    assert strict.dots_painted == 0
+
+
+def test_touch_up_max_dot_size_default():
+    from aff.blank_forms.image_fallback.touch_up import TOUCH_UP_MAX_DOT_SIZE_PX
+    assert TOUCH_UP_MAX_DOT_SIZE_PX == 8
+
+
 def test_gap_threshold_ratio_default():
     assert GAP_THRESHOLD_RATIO == 1.3
