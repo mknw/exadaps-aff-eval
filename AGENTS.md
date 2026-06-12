@@ -214,7 +214,7 @@ lane. Each release is pinned by a named `Recipe` in
 
 | Codename | Sources | Approach | Docs |
 | --- | --- | --- | --- |
-| `funxd-synth-v0-beta` | FUNSD (199) + XFUND-de (199) + XFUND-fr (199) | image-fallback, Strategy B v2 (`detect_dotted_cc=True`) @ 150 dpi | 597 |
+| `funxd-synth-v0-beta` | FUNSD (199) + XFUND-de (199) + XFUND-fr (199), minus excluded docs | image-fallback, Strategy B (`detect_dotted_cc=True`) @ 150 dpi; touch-up OFF | **596** |
 
 One-command build:
 
@@ -226,15 +226,31 @@ Output under `data/synth_dataset/<codename>/`:
 
 ```
 <codename>.pdf                          combined scrollable PDF, one page per doc
-manifest.json                            doc metadata + category_compatibility
+manifest.json                            doc metadata + category_compatibility + build_stats
 funsd|xfund_de|xfund_fr/<doc_id>.fields.json   per-doc annotations
 out/<doc_id>/{blank.pdf, labels.json}   per-doc blanked artifacts
 out/manifest.jsonl                       per-run summary, one line per doc
 ```
 
-Known limitations of v0-beta are documented in README and tracked on
-GitHub issue #3 (median-fill ghost characters, bbox-extent label
-clipping).
+Each release is pinned by a `Recipe` (`build_dataset.py::RECIPES`):
+sources, approach, dpi, `classifier_kwargs`, `include_subtypes`,
+`exclude_doc_ids`, `touch_up_dotted_lines`.
+
+**Exclusions.** `EXCLUSIONS` (`build_dataset.py`) maps `doc_id → reason`
+for documents kept out of every release; the recipe passes them to
+`build_manifest(exclude_doc_ids=...)`, which hard-drops them and records
+the count in `manifest.json`'s `build_stats.excluded_dropped`.
+`docs/dataset-exclusions.md` is the human log. v0-beta excludes
+`fr_train_70` (mislabeled annotations) → 596 docs.
+
+**Touch-up is off in the release.** The clone-stamp dotted-line touch-up
+(`image_fallback/touch_up.py`) is opt-in via the CLI and disabled in the
+v0-beta recipe: it hallucinates dotted lines on FUNSD's typewriter
+fill-character baselines (issue #7). See `docs/approaches/image-fallback.md`.
+
+Known limitations of v0-beta are tracked on GitHub: #7 (touch-up FUNSD
+false positives), #3 (median-fill ghosts + bbox-extent label clipping),
+#8 (checkboxes), #9 (dashed lines / fillable-region synthesis).
 
 ### VRDU — deferred
 

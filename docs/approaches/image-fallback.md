@@ -202,18 +202,83 @@ right place to fix systematically misaligned annotations until the
 annotation layer is corrected upstream. Flagged for removal once the
 annotations are normalised; see issue #3.
 
+## Dotted-line touch-up (clone-stamp)
+
+`touch_up.py` — a **post-erase** pass that reconstructs dotted fill-in
+lines erased along with the answer. **Opt-in** (`--touch-up-dotted-lines`)
+and **off in the FUNXD-SYNTH v0-beta release** (see limitation below).
+
+Rather than synthesising dots (measure size/colour, draw an ellipse —
+which over/under-shot the dot size), it **clone-stamps real dots**,
+Photoshop-healing-brush style:
+
+1. Re-detect dotted clusters on the post-erase page with a **gap-tolerant**
+   variant of `find_dotted_clusters` (the CV check ignores spacings beyond
+   1.5× median, so a wide erased gap doesn't reject the cluster).
+2. Fit a least-squares **baseline** `y = f(x)` through the surviving dot
+   centroids, so stamped dots follow a skewed scan, not a flat average.
+3. Find inter-dot gaps wider than `GAP_THRESHOLD_RATIO` (1.3) × the
+   cluster's mean spacing; compute uniform target positions inside them.
+4. For each target **inside a previously-erased bbox**, find the nearest
+   surviving real dot, isolate it (Otsu + centre connected-component so a
+   neighbour can't leak in), and clone its exact ink pixels onto the
+   baseline. Size / colour / shape come from the real dot.
+
+It only stamps inside erased bboxes, so it cannot create artifacts where
+the redactor didn't touch.
+
+### Touch-up tunables (`touch_up.py`)
+
+Looser than Strategy B's classify-time defaults — the touch-up only paints
+inside erased bboxes, so over-eager detection there is cheap, whereas
+Strategy B decides during the live erase where a false preserve is permanent.
+
+| Constant | Value | vs Strategy B | Why |
+| --- | --- | --- | --- |
+| `TOUCH_UP_MAX_DOT_SIZE_PX` | 8 | 6 | xfund bold dots are 7–8 px (fr_train_46/83 filled nothing at 6) |
+| `TOUCH_UP_MIN_CLUSTER_SIZE` | 3 | 4 | catch short surviving fragments |
+| `TOUCH_UP_MIN_CLUSTER_WIDTH_PX` | 10 | 20 | same |
+| `TOUCH_UP_MAX_SPACING_CV` | 0.4 | 0.3 | gap-tolerant filter strips outliers first |
+| `TOUCH_UP_Y_TOLERANCE_PX` | 3 | 2 | keep a mildly-skewed line in one cluster |
+| `GAP_THRESHOLD_RATIO` | 1.3 | — | fill smaller sub-gaps |
+| `MIN_DOTTED_CLUSTERS_PER_PAGE` | 5 | — | doc-level gate: a page needs ≥5 clusters before any are trusted (suppresses sparse spurious detections); set 0 to disable |
+
+### Debug overlay (`--touch-up-debug-dir`)
+
+Per-page PNG, colour-coded by importance: **magenta** stamped dots,
+**red** detected gaps, **green** surviving clusters + fitted baselines,
+**amber** rejected candidate bands (with reason), **faint cyan** erased
+bboxes. The per-run `manifest.jsonl` carries `touch_up_dots`,
+`touch_up_clusters`, `touch_up_gaps`, `touch_up_notes` (e.g.
+`single_sided:no_right_anchor`, `below_dotted_threshold`).
+
+### Known limitation — FUNSD false positives (issue #7)
+
+FUNSD forms build fill-in baselines from **rows of repeated typewriter
+characters** (`ffff`/`oooo`/`cccc`/`LLLL`/periods). A connected-component
+detector can't tell a row of `o` from a row of dots, and those letters are
+the same ~7–8 px size as xfund's genuine bold dots — so neither the size
+cap nor answer-coincidence separates them. On a full v0-beta build, 58 %
+of FUNSD docs got spurious lines. The real fix is a **dot-vs-glyph
+discriminator** (duty-cycle / fill-ratio); until it lands, touch-up is
+off in the release.
+
 ## Open work
 
-- **Dotted-line touch-up pass** — Strategy B trades recall for FP
-  suppression; some real dotted lines still drop. Planned post-pass
-  finds detected dotted-line clusters with gaps inside previously-
-  erased answer bboxes and paints synthetic dots into the gap at the
-  cluster's mean spacing.
-- **Redaction-fill noise / per-pixel sampling** — current median fill
-  reveals answer-location ghosts on multi-coloured backgrounds. See
-  issue #3 for exploration directions (per-pixel paper sampling,
-  calibrated Gaussian noise, background-pattern continuation).
-- **Acroform clear unification** — `_clear_acroform_widgets` here
-  strips `/V` and `/AP` only; pymupdf-redact's `acroform_clear.py`
-  also strips `/DV` and `/MK /BG` (commit `51df4f2`). Belt-and-braces
-  alignment is queued so both lanes match.
+- **Dot-vs-glyph discriminator (issue #7)** — separate real dotted lines
+  from typewriter fill-character rows so touch-up can ship in the release.
+  *Current focus.*
+- **Pre-erase detection (obs-13, unfiled)** — detect dotted lines on the
+  clean image so a line *fully inside* an answer bbox can be rebuilt
+  (post-erase there are no survivors to bracket). Distinct from #7; does
+  not fix the FUNSD FPs on its own.
+- **Checkbox detection (issue #8)** — `fr_train_39`-style checkbox rows
+  with a trailing "other, specify ___".
+- **Dashed lines + fillable-region synthesis (issue #9)** — dashes are a
+  distinct primitive; synthesising dots at other fillable answer
+  locations is a speculative experiment.
+- **Redaction-fill noise / per-pixel sampling (issue #3)** — median fill
+  reveals answer-location ghosts on multi-coloured backgrounds.
+- **Acroform clear unification** — `_clear_acroform_widgets` here strips
+  `/V` and `/AP` only; pymupdf-redact's `acroform_clear.py` also strips
+  `/DV` and `/MK /BG` (commit `51df4f2`). Alignment queued.

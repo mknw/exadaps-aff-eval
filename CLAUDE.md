@@ -35,22 +35,40 @@ and is no longer maintained. Do not extend it.
   check each worktree's `STATE.md`.
 - **Golden set** of 8 curated documents under `tests/fixtures/golden_set/`.
   Used as the small fixed evaluation slice every approach runs against.
-- **`FUNXD-SYNTH v0-beta`** — first released dataset cut. 597 docs
-  (FUNSD + XFUND-de + XFUND-fr) blanked via image-fallback with
-  Strategy B v2 (CC-based dotted-line preservation). One-command build
-  via `aff.synth.build_dataset`. See README for details.
+- **`FUNXD-SYNTH v0-beta`** — first released dataset cut. **596 docs**
+  (FUNSD + XFUND-de + XFUND-fr; `fr_train_70` excluded as mislabeled)
+  blanked via image-fallback with Strategy B (CC-based dotted-line
+  preservation). One-command build via `aff.synth.build_dataset`. See
+  README for details.
+- **Clone-stamp dotted-line touch-up** — shipped on branch
+  `feature/touch-up-clone-stamp` (PR #6), **opt-in** via the
+  image-fallback CLI (`--touch-up-dotted-lines`). It heals dotted
+  fill-in lines erased along with answers by cloning a real surviving
+  dot along a fitted baseline. **Deliberately OFF in the v0-beta
+  release** — see current objective.
 
 ## Current objective
 
-**Iterate on the FUNXD-SYNTH family.** Two open problems tracked on
-GitHub:
+**Build a dot-vs-glyph discriminator so the touch-up can ship in the
+release (issue #7).** The touch-up currently hallucinates dotted lines
+on FUNSD because those forms build fill-in baselines from rows of
+repeated typewriter characters (`ffff`/`oooo`/`cccc`/periods), which a
+connected-component dotted-line detector can't distinguish from real
+dots — and they're the same size as xfund's genuine bold dots, so a
+size cap won't separate them. Candidate discriminators: duty-cycle
+(gap ratio), fill-ratio. Until this lands, touch-up stays opt-in / off
+in the release.
 
-- Issue #3 — median-fill redaction leaves visible answer-location
-  ghosts (anti-cheating risk) + bbox-extent mismatches that erase
-  labels. Multiple exploration directions documented on the issue.
-- "Magic touch-up" follow-up — strategies A and B drop some real
-  dotted lines; planned post-pass reconstructs missing dots in detected
-  cluster gaps using the surviving spacing/size statistics.
+Other open tracks (GitHub issues):
+- **#3** — median-fill redaction leaves visible answer-location ghosts
+  (anti-cheating risk) + bbox-extent mismatches that erase labels.
+- **#7** — the dot-vs-glyph discriminator above (current focus).
+- **#8** — checkmark/checkbox detection (`fr_train_39`).
+- **#9** — experimental: dashed-line completion + fillable-region dots.
+- **Pre-erase detection (obs-13, not yet filed)** — detect dotted lines
+  on the clean image so lines *fully inside* an answer bbox can be
+  rebuilt (post-erase there are no survivors to bracket). Helps a
+  distinct case from #7; doesn't fix the FUNSD FPs on its own.
 
 VRDU integration is **deferred**: the entire `vrdu_registration`
 corpus is scans-with-OCR-layer (not born-digital). Routing them to
@@ -82,12 +100,19 @@ src/aff/                       ← live source code
     acroform_clear.py          ← pypdf widget purge helper
     geom.py                    ← shared rect helpers (pad, denormalise, redaction_targets)
     image_fallback/            ← lane #2: rasterise + per-pixel classifier + image-PDF
+      classify.py              ← per-pixel classifier; find_dotted_clusters (Strategy B)
+      redact.py                ← per-bbox erase driver
+      background.py            ← paper-colour sampler
+      touch_up.py              ← clone-stamp dotted-line healer (opt-in)
+      debug.py                 ← classifier + touch-up overlay renderers
+      pipeline.py              ← generate_blank orchestration
+      __main__.py              ← image-fallback batch CLI
     __main__.py                ← CLI dispatcher (reads manifest.json by category)
   synth/                       ← dataset orchestration (shipped)
-    build_dataset.py           ← top-level recipe-based release builder
-    build_manifest.py          ← classify + sample + write manifest
+    build_dataset.py           ← recipe-based release builder; RECIPES + EXCLUSIONS
+    build_manifest.py          ← classify + sample + exclude + write manifest
     classify.py                ← PdfClassification (fitz-based + image PNGs)
-    combine.py                 ← concatenate per-doc PDFs into one scrollable file
+    combine.py                 ← concat per-doc PDFs; --only-touched + footer captions
     document_kind.py           ← FARA filename subtype detection
     preview.py                 ← recolor-glyph debug PDFs
     sample.py                  ← stratified deterministic sampling
@@ -96,6 +121,7 @@ tests/                         ← live test suite
   synth/                       ← synth-module tests
   fixtures/golden_set/         ← 8 curated docs; manifest.json + per-doc fields.json
 docs/approaches/               ← one .md per approach (pymupdf-redact + image-fallback shipped)
+docs/dataset-exclusions.md     ← log of docs dropped from releases + why
 legacy/                        ← archived pre-rewrite code; reference only, do not extend
 data/                          ← all data; gitignored except data/test_forms/
 .github/CLAUDE_WORKFLOW.md     ← branch + commit + PR rules
@@ -133,5 +159,15 @@ One-command release build (FUNXD-SYNTH from FUNSD + XFUND):
 
 ```bash
 uv run python -m aff.synth.build_dataset funxd-synth-v0-beta
-# → data/synth_dataset/funxd-synth-v0-beta/funxd-synth-v0-beta.pdf (597 docs)
+# → data/synth_dataset/funxd-synth-v0-beta/funxd-synth-v0-beta.pdf (596 docs;
+#   touch-up OFF in the release recipe — see Current objective)
+```
+
+Opt-in dotted-line touch-up + its debug overlay (for QA / xfund-style forms):
+
+```bash
+uv run python -m aff.blank_forms.image_fallback \
+    --manifest <manifest.json> --out-root <out> --dpi 150 \
+    --detect-dotted-cc --touch-up-dotted-lines \
+    --touch-up-debug-dir <debug-dir>
 ```
