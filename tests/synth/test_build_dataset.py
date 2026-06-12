@@ -19,7 +19,10 @@ def test_funxd_synth_v0_beta_recipe_is_pinned():
     assert r.dpi == 150
     assert r.classifier_kwargs == {"detect_dotted_cc": True}
     assert r.include_subtypes is None
-    assert r.touch_up_dotted_lines is True
+    # Touch-up is OFF for the release: its FP rate on non-dotted forms
+    # (FUNSD typewriter fill-character rows read as dotted lines) is too
+    # high until the dot-vs-glyph / pre-erase filter lands.
+    assert r.touch_up_dotted_lines is False
     # fr_train_70 (mislabeled) is excluded from the release.
     assert "fr_train_70" in r.exclude_doc_ids
 
@@ -124,7 +127,9 @@ def test_build_dataset_dispatches_correct_lane(tmp_path: Path, monkeypatch):
     assert len(calls) == 1
     assert calls[0]["dpi"] == 150
     assert calls[0]["classifier_kwargs"] == {"detect_dotted_cc": True}
-    assert calls[0]["touch_up_dotted_lines"] is True
+    # v0-beta ships with touch-up off (FP rate too high); the flag is
+    # threaded through and can be flipped per-recipe once FPs are fixed.
+    assert calls[0]["touch_up_dotted_lines"] is False
 
     # Per-run jsonl exists with the one summary line.
     jsonl = tmp_path / "out" / "funxd-synth-v0-beta" / "out" / "manifest.jsonl"

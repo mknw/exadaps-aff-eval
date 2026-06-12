@@ -61,15 +61,19 @@ RECIPES: dict[str, Recipe] = {
         description=(
             "FUNXD-SYNTH v0-beta. Blanked FUNSD + XFUND_de + XFUND_fr "
             "via image-fallback with Strategy B (CC-based dotted-line "
-            "preservation) + clone-stamp touch-up at 150 dpi. Known "
-            "issues per GitHub issue #3 — see README."
+            "preservation) at 150 dpi. Known issues per GitHub issue #3 "
+            "— see README. NOTE: the clone-stamp touch-up is intentionally "
+            "OFF for the release — its false-positive rate on non-dotted "
+            "forms (esp. FUNSD) is too high until the pre-erase / "
+            "answer-coincidence filter lands. Available opt-in via the "
+            "image-fallback CLI's --touch-up-dotted-lines."
         ),
         sources=["funsd", "xfund_de", "xfund_fr"],
         approach="image-fallback",
         dpi=150,
         classifier_kwargs={"detect_dotted_cc": True},
         exclude_doc_ids=frozenset(EXCLUSIONS),
-        touch_up_dotted_lines=True,
+        touch_up_dotted_lines=False,
     ),
 }
 
