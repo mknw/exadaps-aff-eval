@@ -31,7 +31,10 @@ from PIL import Image
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, TextStringObject
 
-from aff.blank_forms.image_fallback.debug import save_classification_debug
+from aff.blank_forms.image_fallback.debug import (
+    save_classification_debug,
+    save_touch_up_debug,
+)
 from aff.blank_forms.image_fallback.redact import DebugRecord, RedactStats, redact_bbox
 from aff.blank_forms.image_fallback.touch_up import complete_dotted_lines_in_bboxes
 
@@ -136,6 +139,7 @@ def generate_blank(
     debug_dir: str | Path | None = None,
     classifier_kwargs: dict | None = None,
     touch_up_dotted_lines: bool = False,
+    touch_up_debug_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Generate a blanked image-PDF for one document.
 
@@ -181,8 +185,12 @@ def generate_blank(
         by_page.setdefault(int(fld.get("page", 0)), []).append(fld)
 
     debug_root = Path(debug_dir) if debug_dir else None
+    touch_up_debug_root = Path(touch_up_debug_dir) if touch_up_debug_dir else None
     per_field_stats: list[dict[str, Any]] = []
     touch_up_dots: int = 0
+    touch_up_clusters: int = 0
+    touch_up_gaps: int = 0
+    touch_up_notes: list[str] = []
     for page_idx, page_arr in enumerate(pages):
         h, w = page_arr.shape[:2]
         pre_page = page_arr.copy() if debug_root else None
@@ -208,26 +216,23 @@ def generate_blank(
             )
 
         if touch_up_dotted_lines and erased_bboxes_this_page:
-            # Reuse Strategy B's tunables for the touch-up cluster
-            # detector so what the post-pass "sees" matches what the
-            # redactor preserved.
-            cluster_kwargs = {
-                k: v
-                for k, v in (classifier_kwargs or {}).items()
-                if k
-                in {
-                    "max_dot_size_px",
-                    "y_tolerance_px",
-                    "min_cluster_size",
-                    "max_spacing_cv",
-                    "min_cluster_width_px",
-                }
-            }
-            touch_up_dots += complete_dotted_lines_in_bboxes(
-                page_arr,
-                erased_bboxes_this_page,
-                **cluster_kwargs,
-            )
+            # The touch-up uses its own looser detection defaults (see
+            # touch_up.py) rather than inheriting Strategy B's strict
+            # classifier_kwargs — it only paints inside erased bboxes, so
+            # over-eager detection there costs nothing.
+            pre_touch_up = page_arr.copy() if touch_up_debug_root else None
+            tu = complete_dotted_lines_in_bboxes(page_arr, erased_bboxes_this_page)
+            touch_up_dots += tu.dots_painted
+            touch_up_clusters += len(tu.clusters)
+            touch_up_gaps += len(tu.gaps)
+            touch_up_notes.extend(tu.notes)
+            if touch_up_debug_root is not None and pre_touch_up is not None:
+                save_touch_up_debug(
+                    pre_touch_up,
+                    tu,
+                    erased_bboxes_this_page,
+                    touch_up_debug_root / f"{doc_id}_p{page_idx}_touchup.png",
+                )
 
         if debug_root and debug_collector and pre_page is not None:
             save_classification_debug(
@@ -265,5 +270,8 @@ def generate_blank(
         "render": category_render,
         "padding": list(padding),
         "touch_up_dots": touch_up_dots,
+        "touch_up_clusters": touch_up_clusters,
+        "touch_up_gaps": touch_up_gaps,
+        "touch_up_notes": list(dict.fromkeys(touch_up_notes)),
         "fields": per_field_stats,
     }

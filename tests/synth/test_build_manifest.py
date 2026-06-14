@@ -240,6 +240,34 @@ def test_build_manifest_xfund_filters_by_lang(tmp_path: Path, monkeypatch):
     assert not (out_root / "xfund_fr").exists()
 
 
+def test_build_manifest_exclude_doc_ids_drops_docs(tmp_path: Path, monkeypatch):
+    """exclude_doc_ids hard-drops the listed docs from the manifest."""
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    a_png = data_root / "a.png"
+    a_png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    b_png = data_root / "b.png"
+    b_png.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    monkeypatch.setattr(
+        "aff.ingest.xfund.ingest",
+        lambda dr, seed: [
+            _fake_xfund_record("fr_keep", "xfund_fr", a_png),
+            _fake_xfund_record("fr_drop", "xfund_fr", b_png),
+        ],
+    )
+
+    out_root = tmp_path / "out"
+    manifest_path = build_manifest(
+        data_root, out_root, sources=["xfund_fr"], exclude_doc_ids={"fr_drop"}
+    )
+    manifest = json.loads(manifest_path.read_text())
+    ids = {d["doc_id"] for d in manifest["documents"]}
+    assert ids == {"fr_keep"}
+    assert manifest["build_stats"]["excluded_dropped"] == 1
+    assert not (out_root / "xfund_fr" / "fr_drop.fields.json").exists()
+
+
 def test_build_manifest_category_compatibility_lists_image_fallback():
     """The static compatibility map must route image_only_png to image-fallback."""
     from aff.synth.build_manifest import CATEGORY_COMPATIBILITY

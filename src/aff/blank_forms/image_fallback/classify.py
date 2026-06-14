@@ -60,16 +60,34 @@ class DottedCluster:
     """One qualifying row of dots discovered by :func:`find_dotted_clusters`.
 
     Carries enough information to (a) paint the cluster's CCs back onto
-    a mask, and (b) characterise its spacing for the post-redaction
-    touch-up pass that fills in missing dots.
+    a mask, (b) characterise its spacing for the post-redaction touch-up
+    pass, and (c) clone-stamp real dots: ``x_positions`` / ``y_positions``
+    are the surviving dot centroids (sorted by x, paired), which the
+    touch-up uses to fit a baseline and locate the nearest real dot to
+    sample from.
     """
 
     label_ids: list[int]
     x_positions: np.ndarray  # sorted CC centroid x's
+    y_positions: np.ndarray  # CC centroid y's, paired with x_positions
     y_center: float          # mean CC centroid y
     mean_spacing_px: float
     median_dot_width_px: int
     median_dot_height_px: int
+
+
+@dataclass(slots=True, frozen=True)
+class RejectedBand:
+    """A candidate y-band that failed a cluster guard.
+
+    Surfaced by :func:`find_dotted_clusters` when ``collect_rejected`` is
+    set, so the touch-up debug overlay can show *why* a near-miss line
+    wasn't touched.
+    """
+
+    x_positions: np.ndarray
+    y_positions: np.ndarray
+    reason: str
 
 
 def find_dotted_clusters(
@@ -81,12 +99,21 @@ def find_dotted_clusters(
     max_spacing_cv: float = 0.3,
     min_cluster_width_px: int = 20,
     gap_tolerant: bool = False,
-) -> tuple[np.ndarray, list[DottedCluster]]:
+    collect_rejected: bool = False,
+) -> tuple[np.ndarray, list[DottedCluster]] | tuple[
+    np.ndarray, list[DottedCluster], list[RejectedBand]
+]:
     """Find qualifying dotted-line CC clusters in ``fg_mask``.
 
     Returns ``(labels, clusters)`` where ``labels`` is the
     :func:`cv2.connectedComponentsWithStats` label image (kept so
     callers can paint CCs back onto a mask without recomputing CC).
+
+    When ``collect_rejected`` is True, returns a 3-tuple
+    ``(labels, clusters, rejected)`` instead — ``rejected`` is the list
+    of candidate y-bands that failed a guard, each tagged with the
+    reason. Used by the touch-up debug overlay; off by default so the
+    Strategy B path (which discards rejects) pays nothing.
 
     Tunables (v2 defaults — tightened against FPs observed on
     ``xfund_fr`` page 228, where short character fragments under
@@ -115,14 +142,21 @@ def find_dotted_clusters(
       re-discover dotted lines whose middle has been redacted. Default
       False — Strategy B detection on intact pages stays strict.
     """
+    rejected: list[RejectedBand] = []
+
+    def _pack(labels_arr, clusters_list):
+        if collect_rejected:
+            return labels_arr, clusters_list, rejected
+        return labels_arr, clusters_list
+
     if fg_mask.size == 0 or not np.any(fg_mask):
-        return np.zeros_like(fg_mask, dtype=np.int32), []
+        return _pack(np.zeros_like(fg_mask, dtype=np.int32), [])
 
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
         fg_mask, connectivity=8
     )
     if num_labels <= 1:
-        return labels, []
+        return _pack(labels, [])
 
     # Filter to small candidate CCs (likely dots). Carry size info for
     # the median-dot calc later.
@@ -136,7 +170,7 @@ def find_dotted_clusters(
             candidates.append((label_id, float(cx), float(cy), int(cw), int(ch)))
 
     if len(candidates) < min_cluster_size:
-        return labels, []
+        return _pack(labels, [])
 
     # Group by y-band: sort by cy, then cluster contiguous runs whose cy
     # values stay within y_tolerance_px of the cluster's first member.
@@ -152,15 +186,30 @@ def find_dotted_clusters(
     if current:
         grouped.append(current)
 
+    def _reject(cluster_tuples, reason: str) -> None:
+        if not collect_rejected:
+            return
+        rejected.append(
+            RejectedBand(
+                x_positions=np.array([c[1] for c in cluster_tuples], dtype=np.float64),
+                y_positions=np.array([c[2] for c in cluster_tuples], dtype=np.float64),
+                reason=reason,
+            )
+        )
+
     # For each cluster, check the x-spacing coefficient of variation
     # and the cluster's total horizontal extent.
     results: list[DottedCluster] = []
     for cluster in grouped:
         if len(cluster) < min_cluster_size:
+            _reject(cluster, f"too_few_dots:{len(cluster)}<{min_cluster_size}")
             continue
         cluster.sort(key=lambda t: t[1])  # by cx
         xs = np.array([c[1] for c in cluster], dtype=np.float64)
-        if (xs[-1] - xs[0]) < min_cluster_width_px:
+        ys = np.array([c[2] for c in cluster], dtype=np.float64)
+        width = float(xs[-1] - xs[0])
+        if width < min_cluster_width_px:
+            _reject(cluster, f"too_narrow:{int(width)}px<{min_cluster_width_px}")
             continue
         spacings = np.diff(xs)
         if spacings.size == 0:
@@ -168,11 +217,12 @@ def find_dotted_clusters(
         if gap_tolerant:
             # Filter out spacings beyond 1.5x the median — the gap-induced
             # outliers — and compute the CV from the remainder. A wide
-            # gap from a redacted region doesn't reject the cluster.
+            # gap from a redacted region doesn't inflate the CV.
             median_s = float(np.median(spacings))
             cutoff = max(median_s * 1.5, 1.0)
             normal = spacings[spacings <= cutoff]
             if normal.size < 2:
+                _reject(cluster, "insufficient_normal_spacings")
                 continue
             mean = float(normal.mean())
             std = float(normal.std())
@@ -183,6 +233,7 @@ def find_dotted_clusters(
             continue
         cv_ratio = std / mean
         if cv_ratio > max_spacing_cv:
+            _reject(cluster, f"spacing_irregular:cv={cv_ratio:.2f}>{max_spacing_cv}")
             continue
         widths = [c[3] for c in cluster]
         heights = [c[4] for c in cluster]
@@ -190,14 +241,15 @@ def find_dotted_clusters(
             DottedCluster(
                 label_ids=[c[0] for c in cluster],
                 x_positions=xs,
-                y_center=float(np.mean([c[2] for c in cluster])),
+                y_positions=ys,
+                y_center=float(np.mean(ys)),
                 mean_spacing_px=mean,
                 median_dot_width_px=int(np.median(widths)),
                 median_dot_height_px=int(np.median(heights)),
             )
         )
 
-    return labels, results
+    return _pack(labels, results)
 
 
 def _dotted_cc_mask(fg_mask: np.ndarray, **kwargs) -> np.ndarray:

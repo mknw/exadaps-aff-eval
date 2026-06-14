@@ -1,4 +1,4 @@
-"""Tests for the dotted-line touch-up post-pass."""
+"""Tests for the clone-stamp dotted-line touch-up pass."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import numpy as np
 
 from aff.blank_forms.image_fallback.touch_up import (
     GAP_THRESHOLD_RATIO,
+    TouchUpResult,
     complete_dotted_lines_in_bboxes,
 )
 
@@ -17,104 +18,227 @@ def _make_dotted_line_image(
     spacing: int = 8,
     dot_radius: int = 2,
     ink: tuple[int, int, int] = (40, 40, 40),
+    slope: float = 0.0,
 ) -> tuple[np.ndarray, int]:
-    """Return ``(image, y_center_of_line)``.
+    """Return ``(image, y_center)``: white paper, a row of dots at y=h/2.
 
-    White paper with a dotted line of small filled circles at y=h/2,
-    one dot every ``spacing`` px starting at x=spacing.
+    ``slope`` tilts the line (dy per dot step) to exercise the baseline
+    fit.
     """
     img = np.full((height, width, 3), 255, dtype=np.uint8)
-    y = height // 2
-    for x in range(spacing, width - spacing, spacing):
+    y0 = height // 2
+    for k, x in enumerate(range(spacing, width - spacing, spacing)):
+        y = round(y0 + slope * k)
         cv2.circle(img, (x, y), dot_radius, ink, thickness=-1)
-    return img, y
+    return img, y0
 
 
 def _erase_region(img: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> None:
-    """Paint a white rectangle on ``img`` simulating the redactor's erase."""
     img[y0:y1, x0:x1] = 255
 
 
-def test_no_clusters_returns_zero():
-    """Uniform white image has no dotted-line clusters → nothing painted."""
+def _ink_count(img: np.ndarray, bbox) -> int:
+    x0, y0, x1, y1 = bbox
+    region = img[y0:y1, x0:x1]
+    gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
+    return int((gray < 128).sum())
+
+
+def test_returns_touchup_result():
     img = np.full((50, 200, 3), 255, dtype=np.uint8)
-    n = complete_dotted_lines_in_bboxes(img, [(20, 10, 100, 40)])
-    assert n == 0
+    out = complete_dotted_lines_in_bboxes(img, [(20, 10, 100, 40)])
+    assert isinstance(out, TouchUpResult)
+    assert out.dots_painted == 0
 
 
-def test_no_erased_bboxes_returns_zero():
-    """Even with a real dotted line, empty bbox list means nothing to fill."""
-    img, _y = _make_dotted_line_image()
-    n = complete_dotted_lines_in_bboxes(img, [])
-    assert n == 0
+def test_no_erased_bboxes_returns_empty():
+    img, _ = _make_dotted_line_image()
+    out = complete_dotted_lines_in_bboxes(img, [])
+    assert out.dots_painted == 0
+    assert out.clusters == []
 
 
 def test_paints_dots_inside_erased_gap():
-    """Dotted line interrupted by an erased rectangle gets filled back in."""
     img, y_center = _make_dotted_line_image(width=400, spacing=8)
-    # Carve a gap in the middle that spans roughly 10 dot-positions.
-    erase_x0, erase_x1 = 150, 240
-    erase_y0, erase_y1 = y_center - 6, y_center + 6
-    _erase_region(img, erase_x0, erase_y0, erase_x1, erase_y1)
+    bbox = (150, y_center - 6, 240, y_center + 6)
+    _erase_region(img, *bbox)
+    before = _ink_count(img, bbox)
 
-    n = complete_dotted_lines_in_bboxes(
-        img, [(erase_x0, erase_y0, erase_x1, erase_y1)]
-    )
-    assert n > 0
-
-    # Verify the painted dots actually landed inside the erased region by
-    # checking the ink-pixel count grew there. Threshold-inverted: dark
-    # pixels (< 128) are "ink"; before paint the region was uniform 255.
-    erased = img[erase_y0:erase_y1, erase_x0:erase_x1]
-    gray = cv2.cvtColor(erased, cv2.COLOR_RGB2GRAY)
-    ink_pixels = int((gray < 128).sum())
-    assert ink_pixels > 0
+    out = complete_dotted_lines_in_bboxes(img, [bbox], min_dotted_clusters=1)
+    assert out.dots_painted > 0
+    assert _ink_count(img, bbox) > before
 
 
 def test_does_not_paint_outside_erased_bboxes():
-    """A bbox that doesn't overlap any cluster gap → no synthetic dots."""
+    """A bbox not on the dotted line's row gets no stamped dots."""
     img, _ = _make_dotted_line_image(width=400, spacing=8)
-    # The "erased" bbox is well above the dotted line, so its midpoint
-    # isn't in the cluster's y-band. Nothing should fall inside it.
     bbox_above = (50, 0, 150, 8)
-    n = complete_dotted_lines_in_bboxes(img, [bbox_above])
-    assert n == 0
-
-    # Sanity: also confirm no extra ink appeared in that bbox.
-    above = img[0:8, 50:150]
-    gray = cv2.cvtColor(above, cv2.COLOR_RGB2GRAY)
-    assert int((gray < 128).sum()) == 0
+    out = complete_dotted_lines_in_bboxes(img, [bbox_above], min_dotted_clusters=1)
+    assert out.dots_painted == 0
+    assert _ink_count(img, bbox_above) == 0
 
 
 def test_painted_dots_match_cluster_spacing():
-    """Synthetic dots fill the gap at the cluster's mean inter-dot spacing."""
     spacing = 10
     img, y_center = _make_dotted_line_image(width=500, spacing=spacing)
+    bbox = (200, y_center - 5, 320, y_center + 5)
+    _erase_region(img, *bbox)
 
-    erase_x0, erase_x1 = 200, 320  # ~12 px room for ~11 missing dots
-    erase_y0, erase_y1 = y_center - 5, y_center + 5
-    _erase_region(img, erase_x0, erase_y0, erase_x1, erase_y1)
+    out = complete_dotted_lines_in_bboxes(img, [bbox], min_dotted_clusters=1)
+    assert 5 <= out.dots_painted <= 15
 
-    n = complete_dotted_lines_in_bboxes(
-        img, [(erase_x0, erase_y0, erase_x1, erase_y1)]
-    )
-    # Expect close to (gap_width / spacing) - 1 ≈ 11 new dots. Bound the
-    # check loosely; the exact count depends on how the gap rounds.
-    assert 5 <= n <= 15
-
-    # Find centroids of the synthetic dots and check the median spacing
-    # is within 30% of the cluster's spacing.
-    region = img[erase_y0:erase_y1, erase_x0:erase_x1]
+    region = img[bbox[1]:bbox[3], bbox[0]:bbox[2]]
     gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
     _, fg = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    num_labels, _, _, centroids = cv2.connectedComponentsWithStats(fg, connectivity=8)
-    xs = sorted(float(centroids[i, 0]) for i in range(1, num_labels))
+    n, _, _, centroids = cv2.connectedComponentsWithStats(fg, connectivity=8)
+    xs = sorted(float(centroids[i, 0]) for i in range(1, n))
     if len(xs) >= 2:
-        diffs = np.diff(np.asarray(xs))
-        median_diff = float(np.median(diffs))
+        median_diff = float(np.median(np.diff(np.asarray(xs))))
         assert abs(median_diff - spacing) / spacing < 0.3
 
 
+def test_clone_stamp_matches_dot_size():
+    """Stamped dots should be ~the same ink footprint as survivors.
+
+    The clone-stamp copies a real dot, so per-dot ink area in the healed
+    gap should match the surviving dots' area within a loose tolerance —
+    not the over/under-shoot the old fixed-inflation synthesise had.
+    """
+    spacing, radius = 12, 2
+    img, y_center = _make_dotted_line_image(
+        width=500, spacing=spacing, dot_radius=radius
+    )
+    # Measure a surviving dot's area (outside the erased region).
+    surv = img[y_center - 5:y_center + 5, spacing - 4:spacing + 4]
+    surv_area = int((cv2.cvtColor(surv, cv2.COLOR_RGB2GRAY) < 128).sum())
+
+    bbox = (220, y_center - 5, 330, y_center + 5)
+    _erase_region(img, *bbox)
+    out = complete_dotted_lines_in_bboxes(img, [bbox], min_dotted_clusters=1)
+    assert out.dots_painted > 0
+
+    total_ink = _ink_count(img, bbox)
+    per_dot = total_ink / out.dots_painted
+    # Clone-stamped dots match the real dot area within 50%.
+    assert 0.5 * surv_area <= per_dot <= 1.5 * surv_area
+
+
+def test_baseline_fit_follows_skew():
+    """On a mildly tilted line, the fitted baseline tracks the slope.
+
+    Real scan skew is sub-degree; we use a slope whose total drift stays
+    within the touch-up y-band so the line is one cluster, then verify
+    the fit reports a clearly-non-zero slope of the right magnitude
+    (a flat y_center fallback would report ~0 and fail).
+    """
+    spacing, slope = 12, 0.13  # ~2.2 px total drift over ~18 dots
+    img, y_center = _make_dotted_line_image(
+        width=240, height=50, spacing=spacing, slope=slope
+    )
+    # Punch a gap in the middle of the (single) cluster.
+    bbox = (100, y_center - 6, 150, y_center + 6)
+    _erase_region(img, *bbox)
+    out = complete_dotted_lines_in_bboxes(img, [bbox], min_dotted_clusters=1)
+    assert out.dots_painted > 0
+    assert len(out.baselines) >= 1
+    x0, y0, x1, y1 = out.baselines[0]
+    fitted_per_px = (y1 - y0) / (x1 - x0)
+    expected_per_px = slope / spacing  # ~0.0108
+    # Clearly non-flat and in the right ballpark.
+    assert 0.004 < fitted_per_px < 0.020
+    assert abs(fitted_per_px - expected_per_px) < 0.008
+
+
+def test_diagnostics_populated():
+    img, y_center = _make_dotted_line_image(width=400, spacing=8)
+    bbox = (150, y_center - 6, 240, y_center + 6)
+    _erase_region(img, *bbox)
+    out = complete_dotted_lines_in_bboxes(img, [bbox], min_dotted_clusters=1)
+    assert len(out.clusters) >= 1
+    assert len(out.gaps) >= 1
+    assert len(out.stamped_points) == out.dots_painted
+    summ = out.summary()
+    assert summ["touch_up_dots"] == out.dots_painted
+    assert summ["touch_up_clusters"] == len(out.clusters)
+
+
+def test_single_sided_note_when_no_far_anchor():
+    """Dots survive only left of a wide bbox → single_sided note, no fill."""
+    spacing = 10
+    img, y_center = _make_dotted_line_image(width=500, spacing=spacing)
+    # Erase from x=250 to the page edge — no dots survive to the right of
+    # the bbox to bracket a gap, so the right side can't be reconstructed.
+    bbox = (250, y_center - 5, 500, y_center + 5)
+    _erase_region(img, *bbox)
+    out = complete_dotted_lines_in_bboxes(img, [bbox], min_dotted_clusters=1)
+    assert any("single_sided" in n for n in out.notes)
+
+
+def test_fills_bold_dots_above_strategy_b_cap():
+    """7-8 px dots (xfund fr_train_46/83) must be healed by the touch-up.
+
+    Strategy B's 6 px cap excludes them; the touch-up's looser 8 px cap
+    catches them. dot_radius=3 → ~7 px dots.
+    """
+    spacing = 14
+    img, y_center = _make_dotted_line_image(width=520, spacing=spacing, dot_radius=3)
+    bbox = (200, y_center - 6, 340, y_center + 6)
+    _erase_region(img, *bbox)
+    out = complete_dotted_lines_in_bboxes(img, [bbox], min_dotted_clusters=1)
+    assert out.dots_painted > 0
+
+    # Sanity: the same line is NOT healed under Strategy B's stricter cap.
+    img2, yc2 = _make_dotted_line_image(width=520, spacing=spacing, dot_radius=3)
+    _erase_region(img2, 200, yc2 - 6, 340, yc2 + 6)
+    strict = complete_dotted_lines_in_bboxes(
+        img2, [(200, yc2 - 6, 340, yc2 + 6)], max_dot_size_px=6, min_dotted_clusters=1
+    )
+    assert strict.dots_painted == 0
+
+
+def test_touch_up_max_dot_size_default():
+    from aff.blank_forms.image_fallback.touch_up import TOUCH_UP_MAX_DOT_SIZE_PX
+    assert TOUCH_UP_MAX_DOT_SIZE_PX == 8
+
+
+def _make_multi_line_image(n_lines: int, spacing: int = 10) -> np.ndarray:
+    """White page with ``n_lines`` separate dotted rows, well-separated in y."""
+    height = 30 * n_lines + 30
+    img = np.full((height, 400, 3), 255, dtype=np.uint8)
+    for li in range(n_lines):
+        y = 30 + li * 30
+        for x in range(spacing, 400 - spacing, spacing):
+            cv2.circle(img, (x, y), 2, (40, 40, 40), thickness=-1)
+    return img
+
+
+def test_document_gate_suppresses_sparse_page():
+    """A page with fewer than the threshold of dotted lines stamps nothing."""
+    img, y_center = _make_dotted_line_image(width=400, spacing=8)  # 1 line → 1 cluster
+    bbox = (150, y_center - 6, 240, y_center + 6)
+    _erase_region(img, *bbox)
+    # Default gate (5) suppresses the single-cluster page.
+    out = complete_dotted_lines_in_bboxes(img, [bbox])
+    assert out.dots_painted == 0
+    assert any("below_dotted_threshold" in n for n in out.notes)
+    # The detected cluster is still recorded for the debug overlay.
+    assert len(out.clusters) >= 1
+
+
+def test_document_gate_allows_dense_page():
+    """A page with many dotted lines passes the gate and heals a gap."""
+    img = _make_multi_line_image(n_lines=6, spacing=10)
+    y = 30 + 2 * 30  # erase a gap on the 3rd line
+    bbox = (160, y - 6, 260, y + 6)
+    _erase_region(img, *bbox)
+    out = complete_dotted_lines_in_bboxes(img, [bbox])  # default gate
+    assert out.dots_painted > 0
+
+
+def test_min_dotted_clusters_default():
+    from aff.blank_forms.image_fallback.touch_up import MIN_DOTTED_CLUSTERS_PER_PAGE
+    assert MIN_DOTTED_CLUSTERS_PER_PAGE == 5
+
+
 def test_gap_threshold_ratio_default():
-    """Guard against silent change of the gap-detection threshold."""
-    assert GAP_THRESHOLD_RATIO == 1.5
+    assert GAP_THRESHOLD_RATIO == 1.3

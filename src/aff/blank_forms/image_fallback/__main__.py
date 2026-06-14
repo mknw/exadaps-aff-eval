@@ -54,13 +54,23 @@ def main() -> None:
         "--touch-up-dotted-lines", action="store_true",
         help=(
             "After per-bbox erasure, run a post-pass that detects dotted-"
-            "line clusters and fills gaps inside the erased bboxes with "
-            "synthetic dots matching the surviving cluster's spacing + "
-            "ink colour. Only paints inside previously-erased bboxes; "
+            "line clusters and heals gaps inside the erased bboxes by "
+            "clone-stamping the nearest surviving real dot along a fitted "
+            "baseline. Only paints inside previously-erased bboxes; "
             "cannot create dotted-line artifacts elsewhere on the page."
         ),
     )
+    parser.add_argument(
+        "--touch-up-debug-dir", default=None,
+        help=(
+            "Write per-page touch-up overlay PNGs here: magenta stamped "
+            "dots, red gaps, green clusters+baselines, amber rejected "
+            "bands, faint cyan erased bboxes. Implies --touch-up-dotted-lines."
+        ),
+    )
     args = parser.parse_args()
+    if args.touch_up_debug_dir:
+        args.touch_up_dotted_lines = True
 
     classifier_kwargs: dict = {}
     if args.dot_bridge_px > 0:
@@ -110,14 +120,16 @@ def main() -> None:
             debug_dir=args.debug_dir,
             classifier_kwargs=classifier_kwargs or None,
             touch_up_dotted_lines=args.touch_up_dotted_lines,
+            touch_up_debug_dir=args.touch_up_debug_dir,
         )
         summary = {k: v for k, v in result.items() if k != "fields"}
         summary["field_count"] = result["redacted"]
         with run_manifest_path.open("a") as f:
             f.write(json.dumps(summary) + "\n")
+        tu = f" touch_up={result['touch_up_dots']}" if args.touch_up_dotted_lines else ""
         print(
             f"    pages={result['pages']} redacted={result['redacted']} "
-            f"dpi={result['dpi']} render={result['render']}"
+            f"dpi={result['dpi']} render={result['render']}{tu}"
         )
 
     print(f"\nwrote {run_manifest_path}")

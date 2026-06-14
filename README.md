@@ -13,19 +13,19 @@ reports do not).
 
 ---
 
-## Approach lanes
+## Approaches
 
-Five blank-form strategies are explored in parallel. The first has been
-merged; the rest are scaffolded in sibling worktrees and live on
-`approach/*` branches.
+Two blank-form lanes ship today. Together they cover every category.
 
-| Lane | Status | Categories handled | Notes |
-| --- | --- | --- | --- |
-| **pymupdf-redact** | merged on `main` | `born_digital_pdf`, `synthetic_acroform` | First shipped. See `docs/approaches/pymupdf-redact.md`. |
-| content-stream-surgery | in worktree | `born_digital_pdf`, `synthetic_acroform` | Direct content-stream operator removal. |
-| overlay-mask | in worktree | `born_digital_pdf`, `synthetic_acroform` | Overlay background-coloured rects + glyph repaint. |
-| page-rebuild | in worktree | `born_digital_pdf`, `synthetic_acroform` | Extract every element, redraw page, omit answer spans. |
-| image-fallback | in worktree | all four (universal) | High-DPI raster + classical CV removal + image-PDF re-encode. |
+| Lane | Categories | Notes |
+| --- | --- | --- |
+| **pymupdf-redact** | `born_digital_pdf`, `synthetic_acroform` | PDF-native content-stream redaction + AcroForm widget purge. See `docs/approaches/pymupdf-redact.md`. |
+| **image-fallback** | all four (universal) | High-DPI raster + per-pixel classifier (text / h-rule / v-rule) + image-PDF re-encode. See `docs/approaches/image-fallback.md`. |
+
+Three additional lanes (`content-stream-surgery`, `overlay-mask`,
+`page-rebuild`) were scoped as parallel comparisons but are scaffolded
+only — kept in sibling worktrees as possible future directions if a
+shipped lane stops being good enough for some category.
 
 ---
 
@@ -90,7 +90,12 @@ labels.
 
 | Codename | Source corpora | Approach | Docs |
 | --- | --- | --- | --- |
-| `funxd-synth-v0-beta` | FUNSD (199) + XFUND-de (199) + XFUND-fr (199) | image-fallback with Strategy B v2 (CC-based dotted-line preservation) at 150 dpi | 597 |
+| `funxd-synth-v0-beta` | FUNSD (199) + XFUND-de (199) + XFUND-fr (199), minus `fr_train_70` (mislabeled) | image-fallback with Strategy B (CC-based dotted-line preservation) at 150 dpi | **596** |
+
+The clone-stamp dotted-line **touch-up is opt-in and OFF in this release**
+(see Known limitations). Excluded documents are logged in
+[`docs/dataset-exclusions.md`](docs/dataset-exclusions.md); the
+machine-readable source is `EXCLUSIONS` in `src/aff/synth/build_dataset.py`.
 
 #### Build it (one command)
 
@@ -121,22 +126,66 @@ raw corpora elsewhere. Raw FUNSD/XFUND data is downloaded by the
 ingesters on first run (FUNSD via HuggingFace, XFUND via GitHub
 releases).
 
+#### Inspect intermediate steps (`--debug-dir`)
+
+Add `--debug-dir <path>` to write one classifier-overlay PNG per page
+alongside the release, so you can eyeball the pixel classifier's
+decisions:
+
+```bash
+uv run python -m aff.synth.build_dataset funxd-synth-v0-beta \
+    --debug-dir data/process_steps/funxd-synth-v0-beta/classify/
+```
+
+Colour key — **red**: text pixels (erased), **green**: horizontal rules
+(preserved), **blue**: vertical rules / dividers (preserved), **yellow
+outline**: the seed bbox (the actual erase boundary). One PNG per page,
+flat layout, named `<doc_id>_p<N>_classify.png`. Roughly 3–5 MB per page
+at 150 dpi; the full v0-beta run is ~2 GB, so this is opt-in. Touch-up
+is not invoked — debug shows the base classifier only.
+
+#### Dotted-line touch-up (opt-in, off in the release)
+
+A clone-stamp pass reconstructs dotted fill-in lines that get erased
+along with answers: it re-detects the surviving dots, fits a baseline,
+and clones a real surviving dot into the erased gap. It is **not** part
+of the v0-beta release because its false-positive rate on non-dotted
+forms is too high (see below). Run it opt-in:
+
+```bash
+uv run python -m aff.blank_forms.image_fallback \
+    --manifest <manifest.json> --out-root <out> --dpi 150 \
+    --detect-dotted-cc --touch-up-dotted-lines \
+    --touch-up-debug-dir <debug-dir>          # optional colour overlay
+
+# review only the docs it changed, with per-page diagnostic captions:
+uv run python -m aff.synth.combine \
+    --in-root <out> --basename blank.pdf \
+    --run-manifest <out>/manifest.jsonl --only-touched \
+    --out <out>/all_touched.pdf
+```
+
+See `docs/approaches/image-fallback.md` for the algorithm + tunables.
+
 #### Known limitations (v0-beta)
 
-- **Median fill leaves visible answer-location ghosts.** The redactor
-  samples paper color around each answer bbox and writes the median
-  over the text pixels inside; on multi-colored backgrounds (grey
-  field + white border) the median is between, leaving a faint but
-  readable rectangle. See [issue #3](https://github.com/mknw/exadaps-aff-eval/issues/3).
+- **Touch-up hallucinates dotted lines on FUNSD** — FUNSD forms build
+  fill-in baselines from rows of repeated typewriter characters
+  (`ffff`/`oooo`/periods), which the dot detector can't tell from real
+  dots. That's why touch-up is off in the release. See
+  [issue #7](https://github.com/mknw/exadaps-aff-eval/issues/7).
+- **Median fill leaves visible answer-location ghosts.** On multi-coloured
+  backgrounds the sampled paper-colour median sits between, leaving a
+  faint readable rectangle. See
+  [issue #3](https://github.com/mknw/exadaps-aff-eval/issues/3).
 - **VRDU is not included.** All FARA registration-form documents in
   VRDU turned out to be OCR'd scans rather than born-digital PDFs;
   routing them correctly requires a classifier refinement that is out
   of scope for v0-beta.
-- **Dotted-line preservation has both false positives and misses.**
-  Strategy B v2's CC-based detector eliminates the worst FPs (e.g.
-  character descenders preserved as fake dotted lines) but still drops
-  some real dotted lines that are too short or too sparsely spaced.
-  A follow-up "magic touch-up" pass is planned.
+- **Other dotted-line gaps** — checkbox fields
+  ([#8](https://github.com/mknw/exadaps-aff-eval/issues/8)) and
+  dashed lines ([#9](https://github.com/mknw/exadaps-aff-eval/issues/9))
+  are not yet handled.
 
 ---
 

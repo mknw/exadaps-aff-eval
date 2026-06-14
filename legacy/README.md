@@ -14,3 +14,7 @@ The dataset downloaders under `legacy/data_pipeline/ingest/` were ported
 to `src/aff/ingest/`. The 5-stage data-engineering pipeline framing
 (order → consolidate → generate) is dropped — the current project is
 blank-form synthesis, not a unified dataset assembly.
+
+`Hpe aff pipeline prompt.md` (this directory) is the original Claude Code
+prompt that specified that 5-stage pipeline — preserved for provenance, not
+used by any current code.

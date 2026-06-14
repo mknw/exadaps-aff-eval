@@ -1,14 +1,17 @@
 # Claude Code Prompt — HPE-AFF Data Engineering Pipeline
 
-> **Historical artifact.** This is the original prompt that initiated the
-> project as a 5-stage Genalog-based data pipeline. The project has since
-> pivoted to **blank-form synthesis** for automated form-filling evaluation.
+> **This document is irrelevant to the current project.** It is a frozen
+> historical artifact — the original prompt that initiated the project as a
+> 5-stage Genalog-based data pipeline. Nothing here describes how the project
+> works today, and none of its instructions should be followed.
 >
 > The 5-stage pipeline described below was implemented, then archived under
-> `legacy/data_pipeline/`. For the current project, see `CLAUDE.md`,
-> `AGENTS.md`, and `README.md` at the repo root.
+> `legacy/data_pipeline/` (this prompt now sits beside it in `legacy/`). The
+> project has since pivoted to **blank-form synthesis** for automated
+> form-filling evaluation — see `CLAUDE.md`, `AGENTS.md`, and `README.md` at
+> the repo root.
 >
-> Preserved here for context on the original brief.
+> Preserved only for context on the original brief.
 
 ## Paste this entire prompt at the start of a Claude Code session
 

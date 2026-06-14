@@ -226,6 +226,7 @@ def _write_outputs(
     sampled_from_total: int | None = None,
     include_subtypes: list[str] | None = None,
     subtype_dropped: int | None = None,
+    excluded_dropped: int = 0,
 ) -> Path:
     """Write per-doc fields.json + manifest.json for the given candidates."""
     documents: list[dict] = []
@@ -246,6 +247,8 @@ def _write_outputs(
     if include_subtypes is not None:
         build_stats["include_subtypes"] = include_subtypes
         build_stats["subtype_dropped"] = subtype_dropped or 0
+    if excluded_dropped:
+        build_stats["excluded_dropped"] = excluded_dropped
 
     manifest = {
         "version": MANIFEST_VERSION,
@@ -272,6 +275,7 @@ def build_manifest(
     seed: int = 0,
     exclude: set[str] | None = None,
     include_subtypes: set[str] | None = None,
+    exclude_doc_ids: set[str] | None = None,
 ) -> Path:
     """Classify VRDU, filter to processable categories, optionally sample, write.
 
@@ -285,6 +289,10 @@ def build_manifest(
     When ``include_subtypes`` is given, candidates are restricted to docs
     whose FARA filename subtype (e.g. ``"Short-Form"``) is in the set.
     Docs without a recognised subtype are dropped under this filter.
+
+    ``exclude_doc_ids`` hard-drops the listed docs from the manifest
+    entirely (unlike ``exclude``, which only steers sampling). Used to
+    keep known-bad / mislabeled documents out of a release.
     """
     data_root = Path(data_root).resolve()
     out_root = Path(out_root)
@@ -296,6 +304,13 @@ def build_manifest(
         s for s, spec in SOURCES.items() if spec.kind == "pdf"
     ]
     candidates, classified_counts = _collect_candidates(data_root, selected_sources)
+
+    excluded_dropped = 0
+    if exclude_doc_ids:
+        before = len(candidates)
+        candidates = [c for c in candidates if c.record.doc_id not in exclude_doc_ids]
+        excluded_dropped = before - len(candidates)
+        log.info("synth.build_manifest.excluded", dropped=excluded_dropped)
 
     subtype_dropped = 0
     if include_subtypes is not None:
@@ -336,6 +351,7 @@ def build_manifest(
         sampled_from_total=sampled_from_total,
         include_subtypes=sorted(include_subtypes) if include_subtypes else None,
         subtype_dropped=subtype_dropped if include_subtypes is not None else None,
+        excluded_dropped=excluded_dropped,
     )
     log.info(
         "synth.build_manifest.complete",
