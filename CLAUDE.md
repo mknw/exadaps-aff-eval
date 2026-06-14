@@ -163,6 +163,15 @@ uv run python -m aff.synth.build_dataset funxd-synth-v0-beta
 #   touch-up OFF in the release recipe — see Current objective)
 ```
 
+To eyeball the classifier's decisions on every page, add `--debug-dir`:
+
+```bash
+uv run python -m aff.synth.build_dataset funxd-synth-v0-beta \
+    --debug-dir data/process_steps/funxd-synth-v0-beta/classify/
+# → one PNG per page: red=erased text, green=h-rules preserved,
+#   blue=v-rules preserved, yellow outline=seed bbox. ~2 GB at 150 dpi.
+```
+
 Opt-in dotted-line touch-up + its debug overlay (for QA / xfund-style forms):
 
 ```bash

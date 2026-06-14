@@ -189,6 +189,12 @@ CLI surface (`python -m aff.blank_forms.image_fallback`):
 
 - `--dot-bridge-px N` — Strategy A toggle (`N=0` disables).
 - `--detect-dotted-cc` — Strategy B toggle.
+- `--debug-dir <path>` — write one PNG per page showing the classifier's
+  decisions: **red** = text pixels (erased), **green** = horizontal
+  rules (preserved), **blue** = vertical rules / dividers (preserved),
+  **yellow outline** = seed bbox (the erase boundary). Roughly 3–5 MB
+  per page at 150 dpi. The release builder (`aff.synth.build_dataset`)
+  exposes the same flag with the same semantics.
 
 The `FUNXD-SYNTH v0-beta` release pins Strategy B with v2 defaults
 (`max_dot_size_px=6`, `min_cluster_size=4`, `max_spacing_cv=0.3`,

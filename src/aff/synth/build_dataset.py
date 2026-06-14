@@ -8,9 +8,10 @@ under ``<out-root>/<recipe-name>/``.
 Currently supports one release:
 
 * ``funxd-synth-v0-beta`` — FUNSD + XFUND_de + XFUND_fr blanked via
-  image-fallback with Strategy B v2 (CC-based dotted-line preservation).
-  597 docs total. See README for known limitations and issue #3 for
-  the open redaction-artifact work.
+  image-fallback with Strategy B (CC-based dotted-line preservation).
+  596 docs total (``fr_train_70`` excluded as mislabeled). Touch-up is
+  off in this recipe — see issue #7. See README for known limitations
+  and issue #3 for the open redaction-artifact work.
 """
 
 from __future__ import annotations
@@ -90,11 +91,18 @@ def _run_blank_forms(
     recipe: Recipe,
     manifest_path: Path,
     run_out_dir: Path,
+    *,
+    debug_dir: Path | None = None,
 ) -> Path:
     """Iterate the manifest and apply ``recipe.approach`` to each entry.
 
     Returns the path of the per-run ``manifest.jsonl`` written under
     ``run_out_dir``.
+
+    If ``debug_dir`` is given, the image-fallback lane writes one
+    classifier-overlay PNG per page there (text red, h-rule green,
+    v-rule blue, seed bbox yellow outline). Only applies to the
+    image-fallback approach.
     """
     manifest = json.loads(manifest_path.read_text())
     manifest_dir = manifest_path.parent
@@ -105,6 +113,8 @@ def _run_blank_forms(
     run_out_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = run_out_dir / "manifest.jsonl"
     jsonl_path.unlink(missing_ok=True)
+    if debug_dir is not None:
+        debug_dir.mkdir(parents=True, exist_ok=True)
 
     for entry in manifest.get("documents", []):
         if recipe.approach not in category_compat.get(entry["category"], set()):
@@ -128,6 +138,7 @@ def _run_blank_forms(
                 dpi=recipe.dpi,
                 classifier_kwargs=recipe.classifier_kwargs or None,
                 touch_up_dotted_lines=recipe.touch_up_dotted_lines,
+                debug_dir=debug_dir,
             )
             summary = {k: v for k, v in result.items() if k != "fields"}
             summary["field_count"] = result["redacted"]
@@ -143,7 +154,13 @@ def _run_blank_forms(
     return jsonl_path
 
 
-def build_dataset(recipe_name: str, data_root: Path, out_root: Path) -> Path:
+def build_dataset(
+    recipe_name: str,
+    data_root: Path,
+    out_root: Path,
+    *,
+    debug_dir: Path | None = None,
+) -> Path:
     """Build the named release end-to-end. Returns the combined PDF path.
 
     Output layout::
@@ -154,6 +171,9 @@ def build_dataset(recipe_name: str, data_root: Path, out_root: Path) -> Path:
             out/<doc_id>/{blank.pdf,labels.json}   (blank-form lane)
             out/manifest.jsonl                  (per-run summary)
             <recipe_name>.pdf                   (combined scrollable PDF)
+
+    If ``debug_dir`` is given, per-page classifier-overlay PNGs land
+    under it (one per page, flat layout, named ``<doc_id>_p<N>_classify.png``).
     """
     if recipe_name not in RECIPES:
         raise KeyError(
@@ -171,6 +191,7 @@ def build_dataset(recipe_name: str, data_root: Path, out_root: Path) -> Path:
         recipe=recipe.name,
         sources=recipe.sources,
         approach=recipe.approach,
+        debug_dir=str(debug_dir) if debug_dir else None,
     )
 
     manifest_path = build_manifest(
@@ -182,7 +203,7 @@ def build_dataset(recipe_name: str, data_root: Path, out_root: Path) -> Path:
     )
 
     run_out_dir = dataset_dir / "out"
-    _run_blank_forms(recipe, manifest_path, run_out_dir)
+    _run_blank_forms(recipe, manifest_path, run_out_dir, debug_dir=debug_dir)
 
     combined_pdf = dataset_dir / f"{recipe.name}.pdf"
     combine_pdfs(
@@ -218,9 +239,29 @@ def build_dataset(recipe_name: str, data_root: Path, out_root: Path) -> Path:
     show_default=True,
     help="Parent directory; the recipe's release lands under <out-root>/<recipe-name>/.",
 )
-def main(recipe_name: str, data_root: Path, out_root: Path) -> None:
-    combined = build_dataset(recipe_name, data_root, out_root)
+@click.option(
+    "--debug-dir",
+    "debug_dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Write per-page classifier-overlay PNGs here for visual debugging. "
+        "Colour key: red=erased text, green=horizontal rules preserved, "
+        "blue=vertical rules preserved, yellow outline=seed bbox. "
+        "Roughly 3-5 MB per page at 150 dpi; the full v0-beta run is ~2 GB. "
+        "Touch-up is not invoked — debug shows the base classifier only."
+    ),
+)
+def main(
+    recipe_name: str,
+    data_root: Path,
+    out_root: Path,
+    debug_dir: Path | None,
+) -> None:
+    combined = build_dataset(recipe_name, data_root, out_root, debug_dir=debug_dir)
     click.echo(f"wrote {combined}")
+    if debug_dir is not None:
+        click.echo(f"debug overlays in {debug_dir}")
 
 
 __all__ = ["EXCLUSIONS", "RECIPES", "Recipe", "build_dataset"]

@@ -13,19 +13,19 @@ reports do not).
 
 ---
 
-## Approach lanes
+## Approaches
 
-Five blank-form strategies are explored in parallel. The first has been
-merged; the rest are scaffolded in sibling worktrees and live on
-`approach/*` branches.
+Two blank-form lanes ship today. Together they cover every category.
 
-| Lane | Status | Categories handled | Notes |
-| --- | --- | --- | --- |
-| **pymupdf-redact** | merged on `main` | `born_digital_pdf`, `synthetic_acroform` | First shipped. See `docs/approaches/pymupdf-redact.md`. |
-| content-stream-surgery | in worktree | `born_digital_pdf`, `synthetic_acroform` | Direct content-stream operator removal. |
-| overlay-mask | in worktree | `born_digital_pdf`, `synthetic_acroform` | Overlay background-coloured rects + glyph repaint. |
-| page-rebuild | in worktree | `born_digital_pdf`, `synthetic_acroform` | Extract every element, redraw page, omit answer spans. |
-| image-fallback | in worktree | all four (universal) | High-DPI raster + classical CV removal + image-PDF re-encode. |
+| Lane | Categories | Notes |
+| --- | --- | --- |
+| **pymupdf-redact** | `born_digital_pdf`, `synthetic_acroform` | PDF-native content-stream redaction + AcroForm widget purge. See `docs/approaches/pymupdf-redact.md`. |
+| **image-fallback** | all four (universal) | High-DPI raster + per-pixel classifier (text / h-rule / v-rule) + image-PDF re-encode. See `docs/approaches/image-fallback.md`. |
+
+Three additional lanes (`content-stream-surgery`, `overlay-mask`,
+`page-rebuild`) were scoped as parallel comparisons but are scaffolded
+only — kept in sibling worktrees as possible future directions if a
+shipped lane stops being good enough for some category.
 
 ---
 
@@ -125,6 +125,24 @@ match the repo's gitignored data tree; override either if you keep the
 raw corpora elsewhere. Raw FUNSD/XFUND data is downloaded by the
 ingesters on first run (FUNSD via HuggingFace, XFUND via GitHub
 releases).
+
+#### Inspect intermediate steps (`--debug-dir`)
+
+Add `--debug-dir <path>` to write one classifier-overlay PNG per page
+alongside the release, so you can eyeball the pixel classifier's
+decisions:
+
+```bash
+uv run python -m aff.synth.build_dataset funxd-synth-v0-beta \
+    --debug-dir data/process_steps/funxd-synth-v0-beta/classify/
+```
+
+Colour key — **red**: text pixels (erased), **green**: horizontal rules
+(preserved), **blue**: vertical rules / dividers (preserved), **yellow
+outline**: the seed bbox (the actual erase boundary). One PNG per page,
+flat layout, named `<doc_id>_p<N>_classify.png`. Roughly 3–5 MB per page
+at 150 dpi; the full v0-beta run is ~2 GB, so this is opt-in. Touch-up
+is not invoked — debug shows the base classifier only.
 
 #### Dotted-line touch-up (opt-in, off in the release)
 

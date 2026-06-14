@@ -220,6 +220,9 @@ One-command build:
 
 ```bash
 uv run python -m aff.synth.build_dataset funxd-synth-v0-beta
+# add --debug-dir <path> to write per-page classifier overlays
+# (red=erased text, green=h-rules preserved, blue=v-rules preserved,
+# yellow outline=seed bbox); ~2 GB at 150 dpi for the full release.
 ```
 
 Output under `data/synth_dataset/<codename>/`:
