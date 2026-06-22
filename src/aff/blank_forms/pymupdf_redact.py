@@ -19,6 +19,8 @@ from typing import Any
 
 import fitz  # pymupdf
 
+from aff.blank_forms.geom import denormalise, pad, redaction_targets
+
 # Fields are recorded with bbox_norm = [0,0,0,0] when the upstream extractor
 # could not locate a span (typically aggregate/list-typed values). We never
 # redact a zero-area rect.
@@ -37,48 +39,6 @@ def _is_redactable(field: dict[str, Any]) -> bool:
         return False
     x0, y0, x1, y1 = bbox
     return x1 > x0 and y1 > y0
-
-
-def _denormalise(bbox: list[float], page: fitz.Page) -> fitz.Rect:
-    x0, y0, x1, y1 = bbox
-    w, h = page.rect.width, page.rect.height
-    return fitz.Rect(x0 * w, y0 * h, x1 * w, y1 * h)
-
-
-# Field bboxes are derived from a character-origin extractor and tend to be
-# half a glyph's ascender shorter than the visual answer. Pad outward by a
-# small amount so the glyph origin always falls inside the redaction rect.
-_RECT_PAD_PT = 1.5
-
-
-def _pad(rect: fitz.Rect, pad: float = _RECT_PAD_PT) -> fitz.Rect:
-    return fitz.Rect(rect.x0 - pad, rect.y0 - pad, rect.x1 + pad, rect.y1 + pad)
-
-
-def _redaction_targets(
-    page: fitz.Page, base_rect: fitz.Rect, value: str
-) -> list[fitz.Rect]:
-    """Pick the rects we will hand to ``add_redact_annot``.
-
-    For single-line values we prefer ``search_for`` hits inside the
-    padded labeled rect — those give us the tightest glyph rects, so
-    neighbouring labels and column separators stay intact.
-    ``search_for`` doesn't cross line breaks, so for multi-line values
-    we try each line independently and fall back to redacting the whole
-    padded rect if nothing matches.
-    """
-    padded = _pad(base_rect)
-    lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
-    hits: list[fitz.Rect] = []
-    for line in lines:
-        line_hits = page.search_for(line, clip=padded)
-        if line_hits:
-            hits.extend(_pad(h, 0.5) for h in line_hits)
-    if hits and len(hits) >= len(lines):
-        return hits
-    # Fall back to the padded labeled rect — covers multi-line answers,
-    # rotated text, and any value whose glyphs the extractor can't refind.
-    return [padded]
 
 
 def _clear_widget_values(doc: fitz.Document) -> int:
@@ -144,8 +104,8 @@ def generate_blank(
                 skipped.append({"field_id": f["field_id"], "reason": "page-out-of-range"})
                 continue
             page = doc[page_idx]
-            base_rect = _denormalise(f["bbox_norm"], page)
-            for rect in _redaction_targets(page, base_rect, f["value"]):
+            base_rect = denormalise(f["bbox_norm"], page)
+            for rect in redaction_targets(page, base_rect, f["value"]):
                 per_page_targets.setdefault(page_idx, []).append(rect)
             labelled.append(
                 {
@@ -215,7 +175,7 @@ def residual_text(pdf_path: str | Path, fields: list[dict[str, Any]]) -> dict[st
             if not _is_redactable(f):
                 continue
             page = doc[int(f["page"])]
-            rect = _pad(_denormalise(f["bbox_norm"], page))
+            rect = pad(denormalise(f["bbox_norm"], page))
             text = page.get_textbox(rect)
             for needle in (ln.strip() for ln in f["value"].splitlines()):
                 if needle and needle in text:

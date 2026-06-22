@@ -79,13 +79,20 @@ def _render_pdf_pages(
     return img_paths
 
 
-def _parse_subset(
+def parse_subset(
     subset_name: str,
     source: str,
     vrdu_dir: Path,
     img_dir: Path,
     seen_sha256: set[str],
+    render_pages: bool = True,
 ) -> list[DocumentRecord]:
+    """Parse one VRDU subset into ``DocumentRecord``s.
+
+    ``render_pages=False`` skips the per-page PNG render side effect — useful
+    for downstream consumers (e.g. the synth-dataset builder) that work
+    directly from the PDF and don't need the rasterised pages.
+    """
     subset_dir = vrdu_dir / subset_name / "main"
     jsonl_gz = subset_dir / "dataset.jsonl.gz"
     meta_json = subset_dir / "meta.json"
@@ -145,9 +152,12 @@ def _parse_subset(
                 continue
             seen_sha256.add(sha)
 
-            doc_img_dir = img_dir / source
-            doc_img_dir.mkdir(parents=True, exist_ok=True)
-            img_paths = _render_pdf_pages(pdf_path, doc_img_dir, doc_id)
+            if render_pages:
+                doc_img_dir = img_dir / source
+                doc_img_dir.mkdir(parents=True, exist_ok=True)
+                img_paths = _render_pdf_pages(pdf_path, doc_img_dir, doc_id)
+            else:
+                img_paths = []
             primary_image = img_paths[0] if img_paths else ""
 
             field_records: list[FieldRecord] = []
@@ -230,7 +240,7 @@ def ingest(data_root: Path, seed: int) -> list[DocumentRecord]:
     for subset_name, source in _SUBSETS.items():
         try:
             records.extend(
-                _parse_subset(subset_name, source, vrdu_dir, img_dir, seen_sha256),
+                parse_subset(subset_name, source, vrdu_dir, img_dir, seen_sha256),
             )
         except Exception as exc:
             log.error("ingest.vrdu.subset_failed", subset=subset_name, error=str(exc))

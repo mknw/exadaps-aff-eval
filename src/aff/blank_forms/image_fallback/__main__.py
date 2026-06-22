@@ -34,7 +34,49 @@ def main() -> None:
                         help="Restrict to one or more document ids.")
     parser.add_argument("--debug-dir", default=None,
                         help="Write per-page classifier-overlay PNGs under this directory.")
+    parser.add_argument(
+        "--dot-bridge-px", type=int, default=0,
+        help=(
+            "Strategy A: pre-close fg mask with a horizontal kernel of this "
+            "width to bridge dot gaps before the h-rule open. 0 = off. "
+            "5-7 at 150dpi typically preserves dotted underlines."
+        ),
+    )
+    parser.add_argument(
+        "--detect-dotted-cc", action="store_true",
+        help=(
+            "Strategy B: enable CC-based dotted-line detection. Adds the "
+            "dotted-line mask to rule_union, preserving dot rows from "
+            "redaction. Composable with --dot-bridge-px."
+        ),
+    )
+    parser.add_argument(
+        "--touch-up-dotted-lines", action="store_true",
+        help=(
+            "After per-bbox erasure, run a post-pass that detects dotted-"
+            "line clusters and heals gaps inside the erased bboxes by "
+            "clone-stamping the nearest surviving real dot along a fitted "
+            "baseline. Only paints inside previously-erased bboxes; "
+            "cannot create dotted-line artifacts elsewhere on the page."
+        ),
+    )
+    parser.add_argument(
+        "--touch-up-debug-dir", default=None,
+        help=(
+            "Write per-page touch-up overlay PNGs here: magenta stamped "
+            "dots, red gaps, green clusters+baselines, amber rejected "
+            "bands, faint cyan erased bboxes. Implies --touch-up-dotted-lines."
+        ),
+    )
     args = parser.parse_args()
+    if args.touch_up_debug_dir:
+        args.touch_up_dotted_lines = True
+
+    classifier_kwargs: dict = {}
+    if args.dot_bridge_px > 0:
+        classifier_kwargs["dot_bridge_px"] = args.dot_bridge_px
+    if args.detect_dotted_cc:
+        classifier_kwargs["detect_dotted_cc"] = True
 
     manifest_path = Path(args.manifest)
     manifest = json.loads(manifest_path.read_text())
@@ -76,14 +118,18 @@ def main() -> None:
             out_dir,
             dpi=args.dpi,
             debug_dir=args.debug_dir,
+            classifier_kwargs=classifier_kwargs or None,
+            touch_up_dotted_lines=args.touch_up_dotted_lines,
+            touch_up_debug_dir=args.touch_up_debug_dir,
         )
         summary = {k: v for k, v in result.items() if k != "fields"}
         summary["field_count"] = result["redacted"]
         with run_manifest_path.open("a") as f:
             f.write(json.dumps(summary) + "\n")
+        tu = f" touch_up={result['touch_up_dots']}" if args.touch_up_dotted_lines else ""
         print(
             f"    pages={result['pages']} redacted={result['redacted']} "
-            f"dpi={result['dpi']} render={result['render']}"
+            f"dpi={result['dpi']} render={result['render']}{tu}"
         )
 
     print(f"\nwrote {run_manifest_path}")

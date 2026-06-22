@@ -182,9 +182,109 @@ All defaults in `classify.classify_window`:
 | `tophat_kernel_px` | 15 | Horizontal width of the black top-hat kernel. Absolute pixels because the criterion is "thin feature in the rasterisation". |
 | `tophat_threshold` | 20 | Top-hat response cut at ~8 % grey. Catches dividers > 30 grey contrast. |
 | `dilate_text_px` | 1 | Anti-alias halo capture; re-subtracts rules afterwards. |
+| `dot_bridge_px` | 0 (off) | Strategy A — pre-close fg with a horizontal kernel of this width before the h-rule open. Bridges dot gaps so the existing h-rule open catches them as h-rules. 5–7 at 150 dpi typically preserves dotted underlines. |
+| `detect_dotted_cc` | False | Strategy B — CC clustering with spacing-variance test (`_dotted_cc_mask`). Detects rows of small CCs with low spacing CV + minimum cluster width; OR'd into `rule_union`. Composable with `dot_bridge_px`. |
+
+CLI surface (`python -m aff.blank_forms.image_fallback`):
+
+- `--dot-bridge-px N` — Strategy A toggle (`N=0` disables).
+- `--detect-dotted-cc` — Strategy B toggle.
+- `--debug-dir <path>` — write one PNG per page showing the classifier's
+  decisions: **red** = text pixels (erased), **green** = horizontal
+  rules (preserved), **blue** = vertical rules / dividers (preserved),
+  **yellow outline** = seed bbox (the erase boundary). Roughly 3–5 MB
+  per page at 150 dpi. The release builder (`aff.synth.build_dataset`)
+  exposes the same flag with the same semantics.
+
+The `FUNXD-SYNTH v0-beta` release pins Strategy B with v2 defaults
+(`max_dot_size_px=6`, `min_cluster_size=4`, `max_spacing_cv=0.3`,
+`min_cluster_width_px=20`). See `_dotted_cc_mask`'s docstring for the
+rationale behind each cutoff.
 
 `PER_SOURCE_SEED_PADDING` in `pipeline.py` carries forward the funsd
 `(40, 5, 5, 5)` and xfund `(30, 5, 5, 5)` shifts learned from the
 legacy pipeline. These bias the yellow bbox before classification — the
 right place to fix systematically misaligned annotations until the
-annotation layer is corrected upstream.
+annotation layer is corrected upstream. Flagged for removal once the
+annotations are normalised; see issue #3.
+
+## Dotted-line touch-up (clone-stamp)
+
+`touch_up.py` — a **post-erase** pass that reconstructs dotted fill-in
+lines erased along with the answer. **Opt-in** (`--touch-up-dotted-lines`)
+and **off in the FUNXD-SYNTH v0-beta release** (see limitation below).
+
+Rather than synthesising dots (measure size/colour, draw an ellipse —
+which over/under-shot the dot size), it **clone-stamps real dots**,
+Photoshop-healing-brush style:
+
+1. Re-detect dotted clusters on the post-erase page with a **gap-tolerant**
+   variant of `find_dotted_clusters` (the CV check ignores spacings beyond
+   1.5× median, so a wide erased gap doesn't reject the cluster).
+2. Fit a least-squares **baseline** `y = f(x)` through the surviving dot
+   centroids, so stamped dots follow a skewed scan, not a flat average.
+3. Find inter-dot gaps wider than `GAP_THRESHOLD_RATIO` (1.3) × the
+   cluster's mean spacing; compute uniform target positions inside them.
+4. For each target **inside a previously-erased bbox**, find the nearest
+   surviving real dot, isolate it (Otsu + centre connected-component so a
+   neighbour can't leak in), and clone its exact ink pixels onto the
+   baseline. Size / colour / shape come from the real dot.
+
+It only stamps inside erased bboxes, so it cannot create artifacts where
+the redactor didn't touch.
+
+### Touch-up tunables (`touch_up.py`)
+
+Looser than Strategy B's classify-time defaults — the touch-up only paints
+inside erased bboxes, so over-eager detection there is cheap, whereas
+Strategy B decides during the live erase where a false preserve is permanent.
+
+| Constant | Value | vs Strategy B | Why |
+| --- | --- | --- | --- |
+| `TOUCH_UP_MAX_DOT_SIZE_PX` | 8 | 6 | xfund bold dots are 7–8 px (fr_train_46/83 filled nothing at 6) |
+| `TOUCH_UP_MIN_CLUSTER_SIZE` | 3 | 4 | catch short surviving fragments |
+| `TOUCH_UP_MIN_CLUSTER_WIDTH_PX` | 10 | 20 | same |
+| `TOUCH_UP_MAX_SPACING_CV` | 0.4 | 0.3 | gap-tolerant filter strips outliers first |
+| `TOUCH_UP_Y_TOLERANCE_PX` | 3 | 2 | keep a mildly-skewed line in one cluster |
+| `GAP_THRESHOLD_RATIO` | 1.3 | — | fill smaller sub-gaps |
+| `MIN_DOTTED_CLUSTERS_PER_PAGE` | 5 | — | doc-level gate: a page needs ≥5 clusters before any are trusted (suppresses sparse spurious detections); set 0 to disable |
+
+### Debug overlay (`--touch-up-debug-dir`)
+
+Per-page PNG, colour-coded by importance: **magenta** stamped dots,
+**red** detected gaps, **green** surviving clusters + fitted baselines,
+**amber** rejected candidate bands (with reason), **faint cyan** erased
+bboxes. The per-run `manifest.jsonl` carries `touch_up_dots`,
+`touch_up_clusters`, `touch_up_gaps`, `touch_up_notes` (e.g.
+`single_sided:no_right_anchor`, `below_dotted_threshold`).
+
+### Known limitation — FUNSD false positives (issue #7)
+
+FUNSD forms build fill-in baselines from **rows of repeated typewriter
+characters** (`ffff`/`oooo`/`cccc`/`LLLL`/periods). A connected-component
+detector can't tell a row of `o` from a row of dots, and those letters are
+the same ~7–8 px size as xfund's genuine bold dots — so neither the size
+cap nor answer-coincidence separates them. On a full v0-beta build, 58 %
+of FUNSD docs got spurious lines. The real fix is a **dot-vs-glyph
+discriminator** (duty-cycle / fill-ratio); until it lands, touch-up is
+off in the release.
+
+## Open work
+
+- **Dot-vs-glyph discriminator (issue #7)** — separate real dotted lines
+  from typewriter fill-character rows so touch-up can ship in the release.
+  *Current focus.*
+- **Pre-erase detection (obs-13, unfiled)** — detect dotted lines on the
+  clean image so a line *fully inside* an answer bbox can be rebuilt
+  (post-erase there are no survivors to bracket). Distinct from #7; does
+  not fix the FUNSD FPs on its own.
+- **Checkbox detection (issue #8)** — `fr_train_39`-style checkbox rows
+  with a trailing "other, specify ___".
+- **Dashed lines + fillable-region synthesis (issue #9)** — dashes are a
+  distinct primitive; synthesising dots at other fillable answer
+  locations is a speculative experiment.
+- **Redaction-fill noise / per-pixel sampling (issue #3)** — median fill
+  reveals answer-location ghosts on multi-coloured backgrounds.
+- **Acroform clear unification** — `_clear_acroform_widgets` here strips
+  `/V` and `/AP` only; pymupdf-redact's `acroform_clear.py` also strips
+  `/DV` and `/MK /BG` (commit `51df4f2`). Alignment queued.

@@ -21,11 +21,21 @@ import numpy as np
 from PIL import Image
 
 from aff.blank_forms.image_fallback.redact import DebugRecord
+from aff.blank_forms.image_fallback.touch_up import TouchUpResult
 
 TEXT_COLOR = (255, 0, 0)
 H_RULE_COLOR = (0, 200, 0)
 V_RULE_COLOR = (0, 80, 255)
 SEED_BBOX_COLOR = (255, 215, 0)
+
+# Touch-up overlay palette. Saturation tracks importance: the stamped
+# dots (the intervention) are the brightest; the erased-region context
+# is the faintest.
+TU_STAMPED_COLOR = (255, 0, 255)   # magenta — synthetic dots we placed
+TU_GAP_COLOR = (230, 0, 0)         # red — detected gaps (the problem)
+TU_CLUSTER_COLOR = (0, 180, 0)     # green — surviving dots + fitted baseline
+TU_REJECTED_COLOR = (255, 170, 0)  # amber — candidate bands that failed a guard
+TU_ERASED_COLOR = (0, 180, 200)    # faint cyan — erased-bbox context
 
 
 def _blend(canvas: np.ndarray, color: tuple[int, int, int], mask: np.ndarray, alpha: float) -> None:
@@ -74,5 +84,60 @@ def save_classification_debug(
     """Render the overlay and save it as PNG. Returns ``out_path``."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     overlay = overlay_classification(image, records, alpha=alpha)
+    Image.fromarray(overlay).save(out_path, optimize=True)
+    return out_path
+
+
+def _scatter(canvas: np.ndarray, pts, color: tuple[int, int, int], radius: int) -> None:
+    for x, y in pts:
+        cv2.circle(canvas, (int(x), int(y)), radius, color, thickness=-1)
+
+
+def overlay_touch_up(
+    image: np.ndarray,
+    result: TouchUpResult,
+    erased_bboxes,
+) -> np.ndarray:
+    """Return a new RGB image annotating one page's touch-up decisions.
+
+    Layered bottom→top by importance: erased-bbox context (faint cyan),
+    rejected candidate bands (amber), surviving clusters + fitted
+    baselines (green), detected gaps (red), stamped dots (magenta).
+    """
+    canvas = image.copy() if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+
+    for x0, y0, x1, y1 in erased_bboxes:
+        cv2.rectangle(canvas, (int(x0), int(y0)), (int(x1) - 1, int(y1) - 1), TU_ERASED_COLOR, 1)
+
+    for band in result.rejected:
+        _scatter(canvas, zip(band.x_positions, band.y_positions, strict=True), TU_REJECTED_COLOR, 2)
+
+    for cluster in result.clusters:
+        _scatter(
+            canvas,
+            zip(cluster.x_positions, cluster.y_positions, strict=True),
+            TU_CLUSTER_COLOR,
+            2,
+        )
+    for x0, y0, x1, y1 in result.baselines:
+        cv2.line(canvas, (int(x0), int(y0)), (int(x1), int(y1)), TU_CLUSTER_COLOR, 1)
+
+    for gap in result.gaps:
+        y = int(gap.y)
+        cv2.line(canvas, (int(gap.left_x), y), (int(gap.right_x), y), TU_GAP_COLOR, 1)
+
+    _scatter(canvas, result.stamped_points, TU_STAMPED_COLOR, 2)
+    return canvas
+
+
+def save_touch_up_debug(
+    image: np.ndarray,
+    result: TouchUpResult,
+    erased_bboxes,
+    out_path: Path,
+) -> Path:
+    """Render the touch-up overlay and save it as PNG. Returns ``out_path``."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    overlay = overlay_touch_up(image, result, erased_bboxes)
     Image.fromarray(overlay).save(out_path, optimize=True)
     return out_path

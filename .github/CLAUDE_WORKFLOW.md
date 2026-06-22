@@ -1,27 +1,9 @@
-# Claude Code — GitHub Workflow Instructions
-## HPE-AFF Data Engineering Pipeline
+# Claude Code — GitHub workflow
 
-These instructions govern how Claude Code interacts with the GitHub repository.
-Place this file at `.github/CLAUDE_WORKFLOW.md` and reference it from `CLAUDE.md`.
-
----
-
-## How this works
-
-Claude Code has direct access to the repository via the GitHub integration.
-It can read files, write code, run shell commands, commit, push branches,
-and open pull requests. It does all of this autonomously — but with strict
-rules about when it commits, when it opens PRs, and what it never touches.
-
-The workflow is:
-
-```
-implement one stage → run its tests → commit → proceed
-                                         ↓ if tests fail
-                                    fix → retest → commit
-                                         ↓ after all stages
-                                    final full test → open PR
-```
+How Claude Code interacts with this repository: branches, commits, CI,
+pull requests. The absolute rules in `CLAUDE.md` (never commit to main,
+never commit `data/` or secrets, run tests before commit) override
+anything here.
 
 ---
 
@@ -29,360 +11,183 @@ implement one stage → run its tests → commit → proceed
 
 **Never commit directly to `main`.** Always work on a feature branch.
 
-Branch naming:
-```
-data-pipeline/stage-1-ingest
-data-pipeline/stage-2-order
-data-pipeline/stage-3-consolidate
-data-pipeline/stage-4-generate
-data-pipeline/stage-5-tests
-data-pipeline/packaging
-data-pipeline/ci
+Branch naming — `<scope>/<short-desc>`, kebab-case:
+
+| Scope | When | Example |
+| --- | --- | --- |
+| `approach/<lane>` | Blank-form approach lanes (one per worktree under `~/Code/exadaps-aff-ds-synth-worktrees/`) | `approach/pymupdf-redact` |
+| `synth/<topic>` | Synth-dataset module work | `synth/classifier` |
+| `feature/<topic>` | General feature work | `feature/eval-harness` |
+| `docs/<topic>` | Documentation-only changes | `docs/post-merge-refresh` |
+| `fix/<short-desc>` | Bug fixes | `fix/widget-clear-regression` |
+
+Create the branch at session start:
+
+```bash
+git checkout -b approach/page-rebuild
 ```
 
-Create the branch at the start of the session:
-```bash
-git checkout -b data-pipeline/stage-1-ingest
-```
-
-If a branch for the current stage already exists, check it out and continue:
-```bash
-git checkout data-pipeline/stage-1-ingest
-```
+If a branch for the work already exists, check it out and continue.
 
 ---
 
 ## Commit rules
 
 ### When to commit
-Commit after **each of these specific events** — not before, not after a batch:
 
-1. Module scaffold created (empty files, `__init__.py`, directory structure)
-2. Each individual ingester implemented and its test passing (`funsd.py`, `xfund.py`, `vrdu.py`, `rvlcdip.py`)
-3. `order.py` implemented and its tests passing
-4. `consolidate.py` implemented and its tests passing
-5. `degradation.py` implemented and its test passing
-6. `synthetic.py` implemented and its test passing
-7. `loader.py` implemented and its test passing
-8. `cli.py` implemented and smoke-tested
-9. Packaging files created (`requirements.txt`, `pyproject.toml`, `.env.example`)
-10. CI workflow file created
-11. Full test suite passes cleanly
+Commit **coherent units of work**, not file-by-file or batched. Each
+commit should leave the tree in a passing-tests state for its scope.
+
+Reasonable commits include:
+
+- A new module file + its tests, when both pass.
+- A schema change + every call-site updated.
+- A new approach implementation + its docs entry.
+- Documentation refresh as a single commit.
 
 ### Commit message format
-```
-<type>(<scope>): <what was done>
-
-<optional body — one sentence on why if non-obvious>
-
-Tests: <test name(s) that pass after this commit>
-```
-
-Types: `feat`, `fix`, `test`, `ci`, `chore`, `docs`
-
-Examples:
-```
-feat(ingest): implement FUNSD ingester with bbox normalisation
-
-Converts absolute pixel coords to 0-1 normalised space during ingestion.
-
-Tests: test_funsd_ingest_schema, test_funsd_bbox_range
-```
 
 ```
-fix(ingest): correct XFUND bbox coordinate system mismatch
+<type>(<scope>): <one-line summary>
 
-XFUND uses top-left origin; normalisation was inverting y-axis.
-
-Tests: test_xfund_bbox_normalised
+<optional body — explain the why if non-obvious>
 ```
 
-```
-feat(stage-2): implement order, deduplication, and split assignment
+Types: `feat`, `fix`, `test`, `refactor`, `docs`, `chore`, `ci`, `build`.
 
-Tests: test_no_duplicate_doc_ids, test_split_proportions, test_quality_score_range
+Examples (drawn from this repo's history):
+
+```
+feat(blank_forms): pymupdf-redact content-stream + widget redaction
+test(golden-set): add 3 XFUND form examples, curate FUNSD/XFUND raw
+ci: strip test steps, keep ruff + add pylint linting
+refactor: archive prior pipeline under legacy/, scaffold src/aff
 ```
 
-### What to always include in the commit
-- The implementation file(s)
-- The test(s) for that implementation
-- Updated `pipeline_state.json` if run status changed
+### What to always include
+
+- Implementation + its tests in the same commit.
+- Updated documentation if behaviour or interface changed.
 
 ### What to never commit
-- `.env` files or any file containing secrets
-- `data/raw/` — downloaded datasets stay local, never in git
-- `data/consolidated/` — generated artifacts, not source
-- `data/generated/` — generated artifacts, not source
-- `__pycache__/` or `.pyc` files
-- Any file over 50MB
 
-Ensure `.gitignore` contains these before the first commit:
-```
-.env
-data/raw/
-data/consolidated/
-data/generated/
-__pycache__/
-*.pyc
-*.parquet
-*.tiff
-*.png   # generated images — not source
-pipeline_state.json
-.hf_cache/
-```
+- `.env` or any file with secrets / API keys.
+- `data/raw/`, `data/synth_dataset/`, `data/process_steps/`, or any other
+  subdirectory of `data/` except `data/test_forms/` (committed fixtures).
+- `__pycache__/`, `.pyc`, `.DS_Store`, `*.parquet`, `*.tiff`.
+- Generated PNGs except those in `tests/fixtures/golden_set/`
+  (whitelisted via `.gitignore`).
 
-Exception: the 10 test form PDFs in `data/test_forms/` ARE committed —
-they are fixtures, not generated artifacts.
+The `.gitignore` already covers these — check `git status` before staging.
 
 ---
 
 ## Test protocol
 
-### Before every commit
-Run only the tests relevant to what was just implemented:
 ```bash
-pytest data_pipeline/tests/test_pipeline.py::test_funsd_ingest_schema -v
+# Toolchain
+nix develop
+uv sync
+
+# Run all tests
+uv run pytest
+
+# Run scoped to a module
+uv run pytest tests/blank_forms/ -v
 ```
 
-Never commit if the relevant test is failing. Fix first.
+Run the relevant tests before each commit. Do not commit on a failing
+test in the scope you're touching. For a feature branch, run the full
+suite before opening the PR.
 
-### After each full stage
-Run all tests implemented so far:
+Lint:
+
 ```bash
-pytest data_pipeline/tests/ -v --tb=short
+uv run ruff check src/ tests/
+uv run pylint --disable=all --enable=E src/aff/
 ```
 
-If any previously passing test breaks, fix the regression before committing.
-
-### Final test — before opening the PR
-Run the complete suite with coverage:
-```bash
-pytest data_pipeline/tests/ -v --tb=short --cov=data_pipeline --cov-report=term-missing
-```
-
-This must pass with:
-- Zero test failures
-- Zero warnings (except pre-approved DeprecationWarnings from third-party libs)
-- Coverage ≥ 80% on `data_pipeline/` (excluding `tests/`)
-
-Do not open the PR until this passes cleanly.
+Ruff is required; pylint errors-only is what CI checks.
 
 ---
 
-## CI configuration
+## CI
 
-Create `.github/workflows/ci.yml`. This runs on every push to any
-`data-pipeline/*` branch and on every PR targeting `main`.
+`.github/workflows/ci.yml` runs **lint only** — ruff + pylint-errors —
+on every push to a branch matching the configured triggers and on every
+PR targeting `main`.
 
-```yaml
-name: HPE-AFF Data Pipeline CI
+CI does **not** run pytest. The test suite depends on local fixture data
+that is too large for CI; tests run locally before commit and before PR.
 
-on:
-  push:
-    branches:
-      - 'data-pipeline/**'
-  pull_request:
-    branches:
-      - main
-
-permissions:
-  contents: read
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install system dependencies for Genalog
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libpango-1.0-0 libpangoft2-1.0-0 \
-            libgdk-pixbuf2.0-0 libcairo2 \
-            libffi-dev
-
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
-
-      - name: Lint with ruff
-        run: ruff check data_pipeline/
-
-      - name: Run test suite
-        env:
-          DATA_ROOT: ./data_ci
-          PIPELINE_SEED: 42
-          PIPELINE_LOG_LEVEL: WARNING
-          # HuggingFace — use cached data in CI, skip download if unavailable
-          HF_DATASETS_OFFLINE: 1
-        run: |
-          pytest data_pipeline/tests/ \
-            -v --tb=short \
-            --cov=data_pipeline \
-            --cov-report=term-missing \
-            --cov-fail-under=80
-
-      - name: Upload coverage report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: .coverage
-```
-
-### Important CI note on HuggingFace datasets
-The CI runner cannot download 2–38GB datasets on every push — that would
-be slow and burn GitHub Actions minutes. Set `HF_DATASETS_OFFLINE=1` in CI.
-
-This means tests that require actual downloaded data must be marked:
-```python
-import pytest
-import os
-
-hf_offline = pytest.mark.skipif(
-    os.getenv("HF_DATASETS_OFFLINE") == "1",
-    reason="Skipped in CI — requires downloaded HuggingFace data"
-)
-
-@hf_offline
-def test_funsd_ingest_schema():
-    ...
-```
-
-Tests that do NOT require downloaded data (schema validation on fixtures,
-manifest count checks, loader API, synthetic PDF tests) must run in CI
-without the skip mark. Structure tests so the majority fall into this category.
+If you add a new branch-naming scope (e.g. `migrate/*`), update
+`.github/workflows/ci.yml`'s `branches:` block so CI fires on it.
 
 ---
 
-## Pull request rules
+## Pull requests
 
-### When to open a PR
-Open **one PR** at the end after the final test suite passes cleanly.
-Do not open intermediate PRs per stage — the branch history provides
-the stage-by-stage record through commit messages.
+### When to open
 
-Exception: open an intermediate PR if Michael explicitly asks for a review
-mid-way, or if a stage introduces a breaking change to an interface another
-person is depending on.
+One PR per coherent change. Open it after:
 
-### PR title format
+1. The branch is committed and pushed.
+2. The full local test suite passes.
+3. Lint passes (`ruff check src/ tests/` + `pylint -E`).
+
+Worktree lanes (`approach/*`) follow a different rule: **they do not
+push and do not open PRs** — they commit locally and the human reviews,
+then merges manually. See `~/.claude/skills/worktree-lanes/SKILL.md`.
+
+### PR title / body
+
+Keep the title short (<70 chars). Use the body for detail.
+
 ```
-feat(data-pipeline): implement five-stage HPE-AFF data engineering pipeline
-```
-
-### PR description template
-```markdown
+gh pr create --title "feat(blank_forms): pymupdf-redact approach" --body "$(cat <<'EOF'
 ## Summary
-Implements the complete five-stage data engineering pipeline for HPE-AFF:
-ingest → order → consolidate → generate → test.
+- What changed and why, 1–3 bullets.
 
-## Stages implemented
-- [x] Stage 1: INGEST — FUNSD, XFUND (de/fr), VRDU, RVL-CDIP
-- [x] Stage 2: ORDER — deduplication, quality scoring, split assignment
-- [x] Stage 3: CONSOLIDATE — Parquet master table + JSON field index
-- [x] Stage 4: GENERATE — Genalog degradation + form_harness.py scaling
-- [x] Stage 5: TEST — full pytest suite
-
-## Datasets ingested
-| Source | Records | Split (train/val/test) |
-|---|---|---|
-| FUNSD | 199 | 139/30/30 |
-| XFUND DE | 199 | 139/30/30 |
-| XFUND FR | 199 | 139/30/30 |
-| VRDU registration | 1,915 | ~1,340/287/288 |
-| VRDU ad_buy | 641 | ~448/96/97 |
-| RVL-CDIP invoice | N | classifier only |
-
-## Test results
-<!-- paste pytest output summary here -->
-
-## Coverage
-<!-- paste coverage summary here -->
-
-## How to use from HPE-AFF
-\`\`\`python
-from data_pipeline import loader
-records = loader.load_for_hpe_aff(split="val", require_pdf=True, require_gt=True)
-\`\`\`
-
-## Notes
-- Genalog degradation applied to train split only
-- RVL-CDIP records are blocked from fill evaluation by assertion in loader.py
-- All random ops use seed=42 — pipeline is fully reproducible
+## Test plan
+- [ ] What to run to verify, as a markdown checklist.
+EOF
+)"
 ```
 
-### PR checklist (Claude Code must verify before opening)
-- [ ] Final pytest run passes with zero failures and zero warnings
-- [ ] Coverage ≥ 80%
-- [ ] Ruff lint passes: `ruff check data_pipeline/`
-- [ ] `.gitignore` excludes all data directories and generated artifacts
-- [ ] No secrets or API keys in any committed file
-- [ ] `requirements.txt` and `pyproject.toml` are committed
-- [ ] CI workflow file is committed and valid YAML
-- [ ] All commit messages follow the format above
-- [ ] PR description has real numbers filled in (not placeholder text)
+### Pre-PR checklist
 
-Open the PR targeting `main` using the GitHub CLI:
-```bash
-gh pr create \
-  --title "feat(data-pipeline): implement five-stage HPE-AFF data engineering pipeline" \
-  --body-file .github/PR_BODY.md \
-  --base main \
-  --head data-pipeline/ci
-```
+- [ ] `uv run pytest` passes locally with zero failures.
+- [ ] `uv run ruff check src/ tests/` is clean.
+- [ ] `uv run pylint --disable=all --enable=E src/aff/` is clean.
+- [ ] No data files, secrets, or generated artifacts in the diff.
+- [ ] Commits are coherent; no `wip:` left behind.
+
+Target `main`. Do not force-push to `main`.
 
 ---
 
-## Error handling during implementation
+## Worktree lanes
 
-### If a test fails after a fix attempt
-Try fixing up to **3 times** on the same test. If it still fails after 3
-attempts, do the following before trying again:
-1. Commit the current state with message `wip(stage-N): debugging <test_name>`
-2. Add a comment in the test file explaining what was tried
-3. Continue — do not get stuck on one test indefinitely
+Approach lanes live in sibling worktrees:
+`~/Code/exadaps-aff-ds-synth-worktrees/approach-<name>/`. Each carries:
 
-### If a dataset download fails
-Log it, skip that ingester, and continue with the others. Record the failure
-in `pipeline_state.json` as `"status": "failed"` with the error message.
-Do not abort the entire pipeline for one dataset failure.
+- An `INSTRUCTIONS.md` (durable brief, git-ignored).
+- A `STATE.md` (per-run resume brief, git-ignored).
+- A branch `approach/<name>`.
 
-### If Genalog system dependencies are missing
-Catch the `ImportError`, log a warning, and skip degradation for that run.
-The pipeline must not crash if Genalog is unavailable — degradation is
-additive, not required for the core pipeline to function.
+Lanes commit but do **not** push and do **not** open PRs. The human
+inspects via `git -C <worktree> log`, then merges manually into `main`.
+
+See `~/.claude/skills/worktree-lanes/SKILL.md` for the full skill spec.
 
 ---
 
-## Session start checklist
-
-At the start of every Claude Code session on this project:
+## Session start
 
 ```bash
-# 1. Check current branch
 git branch --show-current
-
-# 2. Check latest run status
-cat pipeline_state.json 2>/dev/null || echo "Pipeline not started"
-
-# 3. Check test state
-pytest data_pipeline/tests/ -v --tb=line 2>/dev/null | tail -20
-
-# 4. Check for uncommitted changes
-git status
-
-# 5. Run dependent data stages with --all
+git status --short
+uv run pytest tests/ --tb=line -q 2>/dev/null | tail -10
 ```
 
-`pipeline_state.json` is a status log, not record storage. Dependent data
-stages must run in one process with `python -m data_pipeline.cli run --all`.
+Then continue the in-progress work, or branch off `main` for new work.
